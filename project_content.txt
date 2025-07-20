@@ -1,0 +1,678 @@
+=== Project Directory Structure ===
+Root: C:\Users\viktor.jonsson\OneDrive - CellMax Technologies AB\Documents\Repositories\svenviktorjonsson\interpolation-editor
+Relevant files and folders (excluding specified patterns):
+
+.
+├── README.md
+├── constants.js
+├── interpolation-editor.js
+├── package.json
+├── style.css
+├── test-app.js
+├── test.html
+├── utils.js
+
+
+=== File Contents ===
+
+=== README.md ===
+
+
+=== constants.js ===
+// constants.js
+
+// Defines the core algorithm for interpolation
+export const INTERPOLATION_TYPE = {
+    CUBIC_SPLINE: 'cubic_spline',
+    CIRCULAR_ARC: 'circular_arc',
+};
+
+// Defines how corners/vertices are handled
+export const CORNER_HANDLING = {
+    PASS_THROUGH: 'pass_through', // Interpolate through the vertex
+    CUT_ALL: 'cut_all',         // Approximate/fillet all vertices
+    MIXED: 'mixed',             // Cut concave, pass through convex
+};
+
+// Defines the side for open paths (used in MIXED mode)
+export const SIDE_MODE = {
+    LEFT: 'left',
+    RIGHT: 'right',
+    BOTH: 'both', // For creating ribbons/outlines
+};
+
+// Defines how the radius for corner rounding is interpreted
+export const RADIUS_MODE = {
+    ABSOLUTE: 'absolute',   // A fixed value in drawing units
+    RELATIVE: 'relative',   // A percentage of the shortest adjacent edge
+};
+
+// Default style object for a new interpolation preset
+export const DEFAULT_STYLE = {
+    id: `style_${Date.now()}`,
+    name: 'New Spline Style',
+    type: INTERPOLATION_TYPE.CUBIC_SPLINE,
+    cornerHandling: CORNER_HANDLING.MIXED,
+    side: SIDE_MODE.LEFT,
+    radiusMode: RADIUS_MODE.RELATIVE,
+    radiusValue: 0.5,
+    tension: 0.5, // Specific to cubic splines
+};
+
+// UI and Preview canvas constants
+export const PREVIEW_CANVAS_WIDTH = 256;
+export const PREVIEW_CANVAS_HEIGHT = 256;
+export const PREVIEW_BACKGROUND_COLOR = '#2D3748';
+export const PREVIEW_GRID_COLOR = 'rgba(74, 85, 104, 0.8)';
+export const PREVIEW_PATH_COLOR = '#A0AEC0';
+export const PREVIEW_CURVE_COLOR = '#3B82F6';
+export const PREVIEW_FILL_COLOR = 'rgba(59, 130, 246, 0.3)';
+export const PREVIEW_POINT_RADIUS = 4;
+
+=== interpolation-editor.js ===
+// interpolation-editor.js
+import * as C from './constants.js';
+import * as U from './utils.js';
+
+export default class InterpolationEditor {
+    constructor(options = {}) {
+        this.container = options.container || document.body;
+        this.currentStyle = JSON.parse(JSON.stringify(C.DEFAULT_STYLE));
+        
+        this.element = null;
+        this.previewCanvas = null;
+        this.previewCtx = null;
+
+        // Placeholder for event emitting
+        this.onSelect = options.onSelect || (() => {});
+    }
+
+    initialize() {
+        if (this.element) return;
+        this._createDOM();
+        this._addEventListeners();
+        this._updateUIFromState();
+        this.drawPreview();
+    }
+
+    _createDOM() {
+        this.element = document.createElement('div');
+        this.element.className = 'interpolation-editor-container';
+        this.element.style.display = 'none'; // Initially hidden
+
+        // Left Side: Preview Panel
+        const previewPanel = document.createElement('div');
+        previewPanel.className = 'preview-panel';
+        this.previewCanvas = document.createElement('canvas');
+        this.previewCanvas.id = 'preview-canvas';
+        this.previewCanvas.width = C.PREVIEW_CANVAS_WIDTH;
+        this.previewCanvas.height = C.PREVIEW_CANVAS_HEIGHT;
+        this.previewCtx = this.previewCanvas.getContext('2d');
+        previewPanel.appendChild(this.previewCanvas);
+        
+        // Right Side: Controls Panel
+        const controlsPanel = document.createElement('div');
+        controlsPanel.className = 'controls-panel';
+        
+        // --- Name Input ---
+        controlsPanel.innerHTML += `
+            <div class="parameter-group">
+                <div class="parameter-group-header">Style Name</div>
+                <input type="text" id="style-name-input" value="${this.currentStyle.name}" class="value-input" style="text-align: left; padding: 4px 8px;">
+            </div>
+        `;
+        
+        // --- Corner Handling ---
+        controlsPanel.innerHTML += `
+            <div class="parameter-group">
+                <div class="parameter-group-header">Corner Handling</div>
+                <div class="radio-button-group">
+                    <input type="radio" id="ch-pass" name="cornerHandling" value="${C.CORNER_HANDLING.PASS_THROUGH}" checked>
+                    <label for="ch-pass">Pass Through</label>
+                    <input type="radio" id="ch-cut" name="cornerHandling" value="${C.CORNER_HANDLING.CUT_ALL}">
+                    <label for="ch-cut">Cut All</label>
+                    <input type="radio" id="ch-mixed" name="cornerHandling" value="${C.CORNER_HANDLING.MIXED}">
+                    <label for="ch-mixed">Mixed</label>
+                </div>
+            </div>
+        `;
+        
+        // --- Tension Slider (for Spline) ---
+        controlsPanel.innerHTML += `
+             <div class="parameter-group">
+                <div class="parameter-group-header">Tension</div>
+                <div class="slider-container">
+                    <input type="range" id="tension-slider" min="0" max="1" step="0.01" value="${this.currentStyle.tension}">
+                    <input type="number" id="tension-input" min="0" max="1" step="0.01" value="${this.currentStyle.tension}">
+                </div>
+            </div>
+        `;
+
+        // --- Buttons ---
+        const buttonRow = document.createElement('div');
+        buttonRow.className = 'button-row';
+        buttonRow.innerHTML = `
+            <button class="editor-button secondary" id="cancel-button">Cancel</button>
+            <button class="editor-button primary" id="save-button">Save Style</button>
+        `;
+        controlsPanel.appendChild(buttonRow);
+        
+        this.element.appendChild(previewPanel);
+        this.element.appendChild(controlsPanel);
+        this.container.appendChild(this.element);
+    }
+
+    _addEventListeners() {
+        // TODO: Add listeners for all controls to update state and redraw preview
+        const tensionSlider = this.element.querySelector('#tension-slider');
+        const tensionInput = this.element.querySelector('#tension-input');
+
+        const syncTension = (value) => {
+            this.currentStyle.tension = parseFloat(value);
+            tensionSlider.value = this.currentStyle.tension;
+            tensionInput.value = this.currentStyle.tension;
+            this.drawPreview();
+        };
+
+        tensionSlider.addEventListener('input', (e) => syncTension(e.target.value));
+        tensionInput.addEventListener('change', (e) => syncTension(e.target.value));
+        
+        this.element.querySelector('#save-button').addEventListener('click', () => {
+            this.onSelect(this.currentStyle);
+            this.hide();
+        });
+        
+        this.element.querySelector('#cancel-button').addEventListener('click', () => {
+            this.hide();
+        });
+    }
+    
+    _updateUIFromState() {
+        // TODO: Sync all UI elements with this.currentStyle
+        this.element.querySelector(`#style-name-input`).value = this.currentStyle.name;
+        this.element.querySelector(`input[name="cornerHandling"][value="${this.currentStyle.cornerHandling}"]`).checked = true;
+    }
+
+    drawPreview() {
+        if (!this.previewCtx) return;
+
+        const ctx = this.previewCtx;
+        const w = C.PREVIEW_CANVAS_WIDTH;
+        const h = C.PREVIEW_CANVAS_HEIGHT;
+
+        // Clear canvas
+        ctx.fillStyle = C.PREVIEW_BACKGROUND_COLOR;
+        ctx.fillRect(0, 0, w, h);
+
+        // Draw sample path (e.g., a simple 'S' curve)
+        const samplePoints = [
+            { x: w * 0.1, y: h * 0.2 },
+            { x: w * 0.4, y: h * 0.8 },
+            { x: w * 0.6, y: h * 0.2 },
+            { x: w * 0.9, y: h * 0.8 },
+        ];
+        
+        // Draw the interpolated curve
+        const curvePoints = U.calculateCubicSpline(samplePoints, this.currentStyle.tension, false);
+        
+        ctx.strokeStyle = C.PREVIEW_CURVE_COLOR;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        curvePoints.forEach((p, i) => {
+            if (i === 0) ctx.moveTo(p.x, p.y);
+            else ctx.lineTo(p.x, p.y);
+        });
+        ctx.stroke();
+
+        // Draw original points
+        ctx.fillStyle = C.PREVIEW_PATH_COLOR;
+        samplePoints.forEach(p => {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, C.PREVIEW_POINT_RADIUS, 0, Math.PI * 2);
+            ctx.fill();
+        });
+    }
+
+    show(styleToEdit = null) {
+        if (styleToEdit) {
+            this.currentStyle = JSON.parse(JSON.stringify(styleToEdit));
+        } else {
+            this.currentStyle = JSON.parse(JSON.stringify(C.DEFAULT_STYLE));
+            this.currentStyle.id = `style_${Date.now()}`;
+        }
+        this.element.style.display = 'grid';
+        this._updateUIFromState();
+        this.drawPreview();
+    }
+
+    hide() {
+        this.element.style.display = 'none';
+    }
+}
+
+=== package.json ===
+{
+  "name": "interpolation-editor",
+  "version": "1.0.0",
+  "description": "a popup for editing interpolation styles",
+  "homepage": "https://github.com/svenviktorjonsson/interpolation-editor#readme",
+  "bugs": {
+    "url": "https://github.com/svenviktorjonsson/interpolation-editor/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/svenviktorjonsson/interpolation-editor.git"
+  },
+  "license": "MIT",
+  "author": "Viktor Jonsson",
+  "type": "commonjs",
+  "main": "interpolation-editor.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}
+
+
+=== style.css ===
+/* ========== INTERPOLATION EDITOR STYLES ========== */
+
+.interpolation-editor-container {
+    font-family: 'Inter', sans-serif;
+    user-select: none;
+    background-color: #2d3748; 
+    padding: 0.5rem;
+    border-radius: 0.5rem;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+    display: grid;
+    grid-template-columns: 2fr 1fr; /* 2/3 for preview, 1/3 for controls */
+    gap: 0.5rem;
+    width: 600px;
+    height: 400px;
+    box-sizing: border-box;
+}
+
+/* ========== PANELS: PREVIEW & CONTROLS ========== */
+.preview-panel, .controls-panel {
+    background-color: rgba(45, 55, 72, 0.5);
+    border-radius: 0.375rem;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.preview-panel {
+    padding: 0.375rem;
+}
+
+#preview-canvas {
+    width: 100%;
+    height: 100%;
+    border-radius: 0.25rem;
+    background-color: #2D3748;
+}
+
+.controls-panel {
+    padding: 0.375rem;
+    gap: 0.75rem;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #4a5568 #2d3748;
+}
+
+.controls-panel::-webkit-scrollbar { width: 6px; }
+.controls-panel::-webkit-scrollbar-track { background: #2d3748; }
+.controls-panel::-webkit-scrollbar-thumb { background-color: #4a5568; border-radius: 3px; }
+
+/* ========== CONTROL GROUPS & HEADERS ========== */
+.parameter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+}
+
+.parameter-group-header {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #a0aec0;
+    text-transform: uppercase;
+    padding-bottom: 0.25rem;
+    border-bottom: 1px solid #4a5568;
+}
+
+/* ========== BUTTONS & INPUTS ========== */
+.radio-button-group {
+    display: flex;
+    gap: 0.25rem;
+    background-color: #4a5568;
+    border-radius: 0.25rem;
+    padding: 2px;
+}
+
+.radio-button-group label {
+    flex: 1;
+    padding: 4px;
+    font-size: 0.75rem;
+    text-align: center;
+    color: #a0aec0;
+    background-color: transparent;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    transition: all 0.15s ease-in-out;
+}
+
+.radio-button-group input[type="radio"] {
+    display: none;
+}
+
+.radio-button-group input[type="radio"]:checked + label {
+    background-color: #3b82f6;
+    color: white;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+.slider-container {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.slider-container input[type="range"] {
+    flex-grow: 1;
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 6px;
+    background: #4a5568;
+    border-radius: 3px;
+    outline: none;
+}
+
+.slider-container input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    background: #3b82f6;
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+.slider-container input[type="number"] {
+    width: 50px;
+    font-size: 0.75rem;
+    background-color: #4a5568; 
+    color: #e2e8f0;
+    text-align: center; 
+    border-radius: 0.25rem; 
+    padding: 0.2rem; 
+    border: 1px solid #718096;
+}
+
+.button-row {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: auto; /* Pushes buttons to the bottom */
+}
+
+.editor-button {
+    flex: 1;
+    padding: 8px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    border: none;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    transition: background-color 0.15s ease-in-out;
+}
+
+.editor-button.primary {
+    background-color: #3b82f6;
+    color: white;
+}
+.editor-button.primary:hover { background-color: #2563eb; }
+
+.editor-button.secondary {
+    background-color: #6b7280;
+    color: #e2e8f0;
+}
+.editor-button.secondary:hover { background-color: #4b5563; }
+
+=== test-app.js ===
+import InterpolationEditor from './interpolation-editor.js';
+
+document.addEventListener('DOMContentLoaded', () => {
+    const openEditorButton = document.getElementById('open-editor-button');
+    const outputDisplayWrapper = document.getElementById('output-display-wrapper');
+    const outputDisplay = document.getElementById('output-display');
+    
+    let currentInterpolationStyle = null;
+
+    // Initialize the editor
+    const editor = new InterpolationEditor({
+        container: document.body, // Append the editor to the body
+        onSelect: (style) => {
+            // This callback is invoked when the 'Save Style' button is clicked
+            console.log('Style saved:', style);
+            currentInterpolationStyle = style;
+            displayStyleObject(currentInterpolationStyle);
+        }
+    });
+    editor.initialize();
+
+    // Show the editor when the button is clicked
+    openEditorButton.addEventListener('click', () => {
+        // Open with no initial state to create a new style
+        editor.show();
+    });
+
+    // Re-open the editor with the current style on double-click
+    outputDisplayWrapper.addEventListener('dblclick', () => {
+        editor.show(currentInterpolationStyle);
+    });
+
+    /**
+     * Displays the style object as a formatted JSON string.
+     * @param {object} style - The interpolation style object from the editor.
+     */
+    function displayStyleObject(style) {
+        if (style) {
+            outputDisplay.textContent = JSON.stringify(style, null, 2);
+        } else {
+            outputDisplay.textContent = 'No style saved yet.';
+        }
+    }
+});
+
+=== test.html ===
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interpolation Editor Test Page</title>
+    
+    <link rel="stylesheet" href="style.css">
+    
+    <style>
+        /* Basic styles for the test page */
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #1a202c;
+            color: #e2e8f0;
+            margin: 0;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        
+        .content {
+            text-align: center;
+            margin-top: 2rem;
+        }
+        
+        .instructions {
+            margin: 1rem 0;
+            font-size: 0.9rem;
+            color: #a0aec0;
+            max-width: 600px;
+        }
+        
+        #open-editor-button {
+            font-size: 1rem;
+            font-weight: 500;
+            padding: 0.75rem 1.5rem;
+            cursor: pointer;
+            border-radius: 0.5rem;
+            border: none;
+            background-color: #3b82f6;
+            color: white;
+            transition: background-color 0.2s;
+        }
+        
+        #open-editor-button:hover {
+            background-color: #2563eb;
+        }
+
+        .output-section {
+            margin-top: 2rem;
+            width: 100%;
+            max-width: 600px;
+        }
+
+        .output-label {
+            font-size: 0.8rem;
+            color: #a0aec0;
+            margin-bottom: 0.5rem;
+        }
+
+        #output-display-wrapper {
+            background-color: #2d3748;
+            border: 1px solid #4a5568;
+            border-radius: 0.375rem;
+            padding: 1rem;
+            min-height: 100px;
+            cursor: pointer;
+        }
+
+        #output-display {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: monospace;
+            font-size: 0.8rem;
+            color: #cbd5e0;
+        }
+
+    </style>
+</head>
+<body>
+    
+    <div class="content">
+        <h1>Interpolation Editor Test</h1>
+        <div class="instructions">
+            <p>Click the button to open the interpolation style editor.</p>
+            <p>Click <strong>"Save Style"</strong> to see the resulting style object below.</p>
+            <p>Double-click the output area to re-open the editor with the last saved style.</p>
+        </div>
+        <button id="open-editor-button">Open Interpolation Editor</button>
+    </div>
+
+    <div class="output-section">
+        <div class="output-label">Current Interpolation Style (Double-click to edit)</div>
+        <div id="output-display-wrapper">
+            <pre><code id="output-display">No style saved yet.</code></pre>
+        </div>
+    </div>
+
+    <script type="module" src="test-app.js"></script>
+</body>
+</html>
+
+=== utils.js ===
+// utils.js
+import * as C from './constants.js';
+
+/**
+ * Calculates points for a Catmull-Rom spline (a type of cubic piecewise spline).
+ * This is a great starting point for the 'Pass Through' and 'Mixed' modes.
+ *
+ * @param {Array<Object>} points - An array of points {x, y} the spline must pass through.
+ * @param {number} tension - A value from 0 to 1 controlling the curve's tightness.
+ * @param {boolean} closed - Whether the path is a closed loop.
+ * @param {number} segments - The number of line segments to draw between each pair of points.
+ * @returns {Array<Object>} An array of points representing the final curve.
+ */
+export function calculateCubicSpline(points, tension = 0.5, closed = false, segments = 16) {
+    if (points.length < 2) return points;
+
+    const path = [];
+    const pts = [...points];
+
+    if (closed) {
+        pts.unshift(points[points.length - 1]);
+        pts.push(points[0], points[1]);
+    } else {
+        pts.unshift(points[0]);
+        pts.push(points[points.length - 1]);
+    }
+
+    const loopEnd = closed ? pts.length - 2 : pts.length - 1;
+    for (let i = 1; i < loopEnd; i++) {
+        if (i > 1 && !closed) {
+             path.push({...pts[i]});
+        }
+        for (let t = 0; t <= segments; t++) {
+            const s = t / segments;
+
+            const p0 = pts[i - 1];
+            const p1 = pts[i];
+            const p2 = pts[i + 1];
+            const p3 = pts[i + 2] || p2;
+
+            const t01 = Math.pow(Math.hypot(p1.x - p0.x, p1.y - p0.y), tension);
+            const t12 = Math.pow(Math.hypot(p2.x - p1.x, p2.y - p1.y), tension);
+            const t23 = Math.pow(Math.hypot(p3.x - p2.x, p3.y - p2.y), tension);
+
+            const m1 = {
+                x: ((p2.x - p1.x) / t12 - (p1.x - p0.x) / t01) * (1 - tension) * t12,
+                y: ((p2.y - p1.y) / t12 - (p1.y - p0.y) / t01) * (1 - tension) * t12
+            };
+
+            const m2 = {
+                x: ((p3.x - p2.x) / t23 - (p2.x - p1.x) / t12) * (1 - tension) * t12,
+                y: ((p3.y - p2.y) / t23 - (p2.y - p1.y) / t12) * (1 - tension) * t12
+            };
+
+            const a = 2 * (p1.x - p2.x) + m1.x + m2.x;
+            const b = -3 * (p1.x - p2.x) - 2 * m1.x - m2.x;
+            const c = m1.x;
+            const d = p1.x;
+
+            const e = 2 * (p1.y - p2.y) + m1.y + m2.y;
+            const f = -3 * (p1.y - p2.y) - 2 * m1.y - m2.y;
+            const g = m1.y;
+            const h = p1.y;
+
+            path.push({
+                x: a * s * s * s + b * s * s + c * s + d,
+                y: e * s * s * s + f * s * s + g * s + h,
+            });
+        }
+    }
+    return path;
+}
+
+
+=== LLM Instructions ===
+Now please just read the project and the rules for writing code and just wait for instructions.
+
+Here are the rules:
+1. DONT write comments, placeholders or docstrings if not explicitely told.
+2. Write functions with the correct initial indentation so that if the function is indented so is your code that you write.
+3. Use regular spaces: " " and do not use " " for space.
+4. For changes that require multiple replacements please tell me what to replace with what instead of rewriting large portions of text. You can use vscode valid regexp for instance.
+5. For small functions less than 50 lines of code pleae rewrite the full function. For larger functions please only write complete control statements if/while/case.
+6. Never omit/change working logic if not explicitely statet that it should be removed/change
+7. DONT use the CANVAS TOOL where code is written in artifacts.
+8. Write one functions that are new seperately ot functions that needs updated.
+9. Make sure to write what has been change where to place/what to replace for each code snippet.
