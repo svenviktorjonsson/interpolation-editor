@@ -1,0 +1,20 @@
+{
+  "name": "interpolation-editor",
+  "version": "1.0.0",
+  "description": "a popup for editing interpolation styles",
+  "homepage": "https://github.com/svenviktorjonsson/interpolation-editor#readme",
+  "bugs": {
+    "url": "https://github.com/svenviktorjonsson/interpolation-editor/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/svenviktorjonsson/interpolation-editor.git"
+  },
+  "license": "MIT",
+  "author": "Viktor Jonsson",
+  "type": "commonjs",
+  "main": "interpolation-editor.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}
