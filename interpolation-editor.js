@@ -178,33 +178,128 @@ export default class InterpolationEditor {
         ctx.fillStyle = C.PREVIEW_BACKGROUND_COLOR;
         ctx.fillRect(0, 0, w, h);
 
-        // Draw sample path (e.g., a simple 'S' curve)
-        const samplePoints = [
-            { x: w * 0.1, y: h * 0.2 },
-            { x: w * 0.4, y: h * 0.8 },
-            { x: w * 0.6, y: h * 0.2 },
-            { x: w * 0.9, y: h * 0.8 },
-        ];
-        
-        // Draw the interpolated curve
-        const curvePoints = U.calculateCubicSpline(samplePoints, this.state.style.tension, false);
-        
-        ctx.strokeStyle = C.PREVIEW_CURVE_COLOR;
-        ctx.lineWidth = 2;
+        // Grid split for 2x2 preview cells
+        ctx.strokeStyle = C.PREVIEW_GRID_COLOR;
+        ctx.lineWidth = 1;
         ctx.beginPath();
-        curvePoints.forEach((p, i) => {
-            if (i === 0) ctx.moveTo(p.x, p.y);
-            else ctx.lineTo(p.x, p.y);
-        });
+        ctx.moveTo(w / 2, 0);
+        ctx.lineTo(w / 2, h);
+        ctx.moveTo(0, h / 2);
+        ctx.lineTo(w, h / 2);
         ctx.stroke();
 
-        // Draw original points
-        ctx.fillStyle = C.PREVIEW_PATH_COLOR;
-        samplePoints.forEach(p => {
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, C.PREVIEW_POINT_RADIUS, 0, Math.PI * 2);
-            ctx.fill();
-        });
+        const drawScenario = ({ cell, points, edges, curves, closed = false }) => {
+            const toCell = (pt) => ({
+                x: cell.x + pt.x * cell.w,
+                y: cell.y + pt.y * cell.h
+            });
+
+            const resolvedPoints = points.map(toCell);
+
+            ctx.save();
+            ctx.strokeStyle = C.PREVIEW_PATH_COLOR;
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash(C.PREVIEW_DASH_PATTERN);
+            edges.forEach(([a, b]) => {
+                const p1 = resolvedPoints[a];
+                const p2 = resolvedPoints[b];
+                ctx.beginPath();
+                ctx.moveTo(p1.x, p1.y);
+                ctx.lineTo(p2.x, p2.y);
+                ctx.stroke();
+            });
+            ctx.setLineDash([]);
+
+            ctx.strokeStyle = C.PREVIEW_CURVE_COLOR;
+            ctx.lineWidth = 2;
+            curves.forEach((path) => {
+                const pathPoints = path.map(index => resolvedPoints[index]);
+                const curvePoints = U.calculateCubicSpline(pathPoints, this.state.style.tension, closed);
+                ctx.beginPath();
+                curvePoints.forEach((p, i) => {
+                    if (i === 0) ctx.moveTo(p.x, p.y);
+                    else ctx.lineTo(p.x, p.y);
+                });
+                ctx.stroke();
+            });
+
+            ctx.fillStyle = C.PREVIEW_PATH_COLOR;
+            resolvedPoints.forEach(p => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, C.PREVIEW_POINT_RADIUS, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            ctx.restore();
+        };
+
+        const halfW = w / 2;
+        const halfH = h / 2;
+
+        const scenarios = [
+            {
+                cell: { x: 0, y: 0, w: halfW, h: halfH },
+                points: [
+                    { x: 0.1, y: 0.75 },
+                    { x: 0.25, y: 0.3 },
+                    { x: 0.4, y: 0.65 },
+                    { x: 0.6, y: 0.35 },
+                    { x: 0.75, y: 0.7 },
+                    { x: 0.9, y: 0.25 }
+                ],
+                edges: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5]],
+                curves: [[0, 1, 2, 3, 4, 5]],
+                closed: false
+            },
+            {
+                cell: { x: halfW, y: 0, w: halfW, h: halfH },
+                points: [
+                    { x: 0.1, y: 0.2 },
+                    { x: 0.3, y: 0.75 },
+                    { x: 0.45, y: 0.25 },
+                    { x: 0.6, y: 0.8 },
+                    { x: 0.75, y: 0.35 },
+                    { x: 0.9, y: 0.7 }
+                ],
+                edges: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5]],
+                curves: [[0, 1, 2, 3, 4, 5]],
+                closed: false
+            },
+            {
+                cell: { x: 0, y: halfH, w: halfW, h: halfH },
+                points: [
+                    { x: 0.2, y: 0.2 },
+                    { x: 0.4, y: 0.1 },
+                    { x: 0.65, y: 0.2 },
+                    { x: 0.8, y: 0.5 },
+                    { x: 0.6, y: 0.75 },
+                    { x: 0.3, y: 0.7 }
+                ],
+                edges: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 0]],
+                curves: [[0, 1, 2, 3, 4, 5, 0]],
+                closed: true
+            },
+            {
+                cell: { x: halfW, y: halfH, w: halfW, h: halfH },
+                points: [
+                    { x: 0.1, y: 0.5 }, // incoming
+                    { x: 0.45, y: 0.5 }, // center
+                    { x: 0.85, y: 0.2 }, // outgoing 1
+                    { x: 0.85, y: 0.8 }, // outgoing 2
+                    { x: 0.6, y: 0.1 }, // outgoing 3
+                    { x: 0.6, y: 0.9 }  // outgoing 4
+                ],
+                edges: [[0, 1], [1, 2], [1, 3], [1, 4], [1, 5]],
+                curves: [
+                    [0, 1, 2],
+                    [0, 1, 3],
+                    [0, 1, 4],
+                    [0, 1, 5]
+                ],
+                closed: false
+            }
+        ];
+
+        scenarios.forEach(drawScenario);
     }
 
     show(styleToEdit = null) {

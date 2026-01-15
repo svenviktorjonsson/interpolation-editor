@@ -47,3 +47,4 @@ export const PREVIEW_PATH_COLOR = '#A0AEC0';
 export const PREVIEW_CURVE_COLOR = '#3B82F6';
 export const PREVIEW_FILL_COLOR = 'rgba(59, 130, 246, 0.3)';
 export const PREVIEW_POINT_RADIUS = 4;
+export const PREVIEW_DASH_PATTERN = [5, 4];
