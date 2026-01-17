@@ -11,13 +11,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const editor = new InterpolationEditor({
         container: document.body, // Append the editor to the body
         onSelect: (style) => {
-            // This callback is invoked when the 'Save Style' button is clicked
+            // This callback is invoked when the 'Select' button is clicked
             console.log('Style saved:', style);
             currentInterpolationStyle = style;
             displayStyleObject(currentInterpolationStyle);
         }
     });
     editor.initialize();
+    editor.show();
 
     // Show the editor when the button is clicked
     openEditorButton.addEventListener('click', () => {

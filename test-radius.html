@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Corner Radius Test</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 12px;
+            background: #111827;
+            color: #e5e7eb;
+            font-family: system-ui, -apple-system, sans-serif;
+            font-size: 14px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 16px;
+        }
+        .card {
+            background: #1f2937;
+            border: 1px solid #374151;
+            border-radius: 10px;
+            padding: 10px;
+            max-width: 320px;
+        }
+        .title {
+            font-size: 13px;
+            margin-bottom: 6px;
+            color: #93c5fd;
+        }
+        canvas {
+            width: 100%;
+            aspect-ratio: 1 / 1;
+            height: auto;
+            display: block;
+            background: #0f172a;
+            border-radius: 8px;
+            max-width: 320px;
+        }
+        .legend {
+            font-size: 12px;
+            color: #9ca3af;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Corner Radius Test</h1>
+    <p>P1 - P2 - P3, dashed lines are the original edges, blue arc follows the affine-mapped base arc.</p>
+    <div class="card">
+        <div class="title">Single Corner</div>
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:8px;">
+            <label style="font-size:12px; color:#9ca3af;">
+                <input id="mode-toggle" type="checkbox" style="margin-right:6px;">
+                Absolute radius (unit edges)
+            </label>
+        </div>
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px;">
+            <label for="length-slider" style="font-size:12px; color:#9ca3af;">Radius scale</label>
+            <input id="length-slider" type="range" min="0" max="1" step="0.01" value="0.6" style="flex:1;">
+            <span id="length-value" style="font-size:12px; color:#9ca3af; width:42px; text-align:right;">0.60</span>
+        </div>
+        <canvas id="canvas-main" width="320" height="320"></canvas>
+        <div class="legend">Gray = edges, Blue = arc, White = P1/P2/P3</div>
+    </div>
+
+    <script>
+        const add = (a, b) => ({ x: a.x + b.x, y: a.y + b.y });
+        const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y });
+        const scale = (v, s) => ({ x: v.x * s, y: v.y * s });
+        const normalize = (v) => {
+            const len = Math.hypot(v.x, v.y);
+            return len === 0 ? { x: 0, y: 0 } : { x: v.x / len, y: v.y / len };
+        };
+        const perp = (v) => ({ x: -v.y, y: v.x });
+
+        const addArcPoints = (ctx, center, startAngle, endAngle, clockwise, steps) => {
+            const totalAngle = clockwise
+                ? ((startAngle - endAngle + Math.PI * 2) % (Math.PI * 2))
+                : ((endAngle - startAngle + Math.PI * 2) % (Math.PI * 2));
+            for (let i = 0; i <= steps; i++) {
+                const t = i / steps;
+                const angle = clockwise
+                    ? startAngle - totalAngle * t
+                    : startAngle + totalAngle * t;
+                const x = center.x + Math.cos(angle) * center.radius;
+                const y = center.y + Math.sin(angle) * center.radius;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+        };
+
+        const applyAffine = (origin, axisX, axisY, point) => ({
+            x: origin.x + axisX.x * point.x + axisY.x * point.y,
+            y: origin.y + axisX.y * point.x + axisY.y * point.y
+        });
+
+        const shortestSweep = (startAngle, endAngle) => {
+            const tau = Math.PI * 2;
+            let delta = (endAngle - startAngle) % tau;
+            if (delta < 0) delta += tau;
+            if (delta > Math.PI) delta -= tau;
+            return delta;
+        };
+
+        const chooseArcDirectionByPoint = (circle, startAngle, endAngle, interiorPoint) => {
+            const sweepCw = (startAngle - endAngle + Math.PI * 2) % (Math.PI * 2);
+            const sweepCcw = (endAngle - startAngle + Math.PI * 2) % (Math.PI * 2);
+            const midCw = startAngle - sweepCw * 0.5;
+            const midCcw = startAngle + sweepCcw * 0.5;
+            const midPoint = (angle) => ({
+                x: circle.x + Math.cos(angle) * circle.radius,
+                y: circle.y + Math.sin(angle) * circle.radius
+            });
+            const pCw = midPoint(midCw);
+            const pCcw = midPoint(midCcw);
+            const dCw = Math.hypot(pCw.x - interiorPoint.x, pCw.y - interiorPoint.y);
+            const dCcw = Math.hypot(pCcw.x - interiorPoint.x, pCcw.y - interiorPoint.y);
+            return dCw < dCcw;
+        };
+
+        const isAngleBetween = (start, mid, end) => {
+            const wrap = (angle) => (angle + Math.PI * 2) % (Math.PI * 2);
+            const s = wrap(start);
+            const m = wrap(mid);
+            const e = wrap(end);
+            if (s > e) return m >= s || m <= e;
+            return m >= s && m <= e;
+        };
+
+        const intersectLines = (p1, d1, p2, d2) => {
+            const cross = d1.x * d2.y - d1.y * d2.x;
+            if (Math.abs(cross) < 1e-8) return null;
+            const t = ((p2.x - p1.x) * d2.y - (p2.y - p1.y) * d2.x) / cross;
+            return { x: p1.x + d1.x * t, y: p1.y + d1.y * t };
+        };
+
+        const setupCanvas = (canvas) => {
+            const rect = canvas.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            const size = Math.floor(Math.min(rect.width, rect.height) * dpr);
+            if (canvas.width !== size || canvas.height !== size) {
+                canvas.width = size;
+                canvas.height = size;
+            }
+            const ctx = canvas.getContext('2d');
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            const pixelScale = canvas.width / rect.width;
+            return { ctx, size, pixelScale };
+        };
+
+        const createScenario = (canvas, slider, valueLabel, toggle) => {
+            const state = {
+                points: [],
+                draggingIndex: null,
+                canvas,
+                desiredScale: Number(slider.value)
+            };
+
+            const updateSliderLabel = () => {
+                valueLabel.textContent = Number(slider.value).toFixed(2);
+            };
+
+            const initPoints = () => {
+                const { size } = setupCanvas(canvas);
+                const center = { x: size / 2, y: size / 2 };
+                const len = size * 0.35;
+                const p2 = center;
+                const p1 = add(p2, { x: 0, y: -len });
+                const p3 = add(p2, { x: len, y: 0 });
+                state.points = [p1, p2, p3];
+                updateSliderLabel();
+            };
+
+            const draw = () => {
+                const { ctx, size, pixelScale } = setupCanvas(canvas);
+                ctx.clearRect(0, 0, size, size);
+                ctx.lineWidth = 2 * pixelScale;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+
+                const [p1, p2, p3] = state.points;
+                const edgeInVec = sub(p1, p2);
+                const edgeOutVec = sub(p3, p2);
+                const edgeIn = normalize(edgeInVec);
+                const edgeOut = normalize(edgeOutVec);
+                const dot = Math.max(-1, Math.min(1, edgeIn.x * edgeOut.x + edgeIn.y * edgeOut.y));
+                const angleDegActual = Math.acos(dot) * (180 / Math.PI);
+                console.groupCollapsed(`draw ${canvas.id} actual=${angleDegActual.toFixed(2)}°`);
+                console.log('p1', p1, 'p2', p2, 'p3', p3);
+                const lenIn = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+                const lenOut = Math.hypot(p3.x - p2.x, p3.y - p2.y);
+                const midA = { x: (p1.x + p2.x) * 0.5, y: (p1.y + p2.y) * 0.5 };
+                const midB = { x: (p2.x + p3.x) * 0.5, y: (p2.y + p3.y) * 0.5 };
+                console.log('edgeIn', edgeIn, 'edgeOut', edgeOut);
+                console.log('midA', midA, 'midB', midB);
+                console.log('lenIn', lenIn, 'lenOut', lenOut);
+
+                ctx.setLineDash([6 * pixelScale, 6 * pixelScale]);
+                ctx.strokeStyle = '#9ca3af';
+                ctx.beginPath();
+                ctx.moveTo(p1.x, p1.y);
+                ctx.lineTo(p2.x, p2.y);
+                ctx.lineTo(p3.x, p3.y);
+                ctx.stroke();
+
+                if (lenIn > 1e-6 && lenOut > 1e-6) {
+                    const origin = p2;
+                    const isAbsolute = toggle.checked;
+                    const axisX = isAbsolute ? normalize(sub(p3, p2)) : sub(p3, p2);
+                    const axisY = isAbsolute ? normalize(sub(p1, p2)) : sub(p1, p2);
+                    const displayScale = isAbsolute ? size * 0.35 : 1;
+                    const maxEdge = Math.max(lenIn, lenOut);
+                    const maxScale = Math.min(1, maxEdge / displayScale);
+                    const baseScale = Math.max(0, Math.min(state.desiredScale, maxScale));
+                    if (Math.abs(Number(slider.value) - baseScale) > 1e-6) {
+                        slider.value = baseScale;
+                        updateSliderLabel();
+                    }
+                    const baseHalf = 0.5 * displayScale;
+                    const baseRadius = baseScale * 0.5 * displayScale;
+                    const baseCenter = { x: baseRadius, y: baseRadius };
+                    const radius = baseRadius;
+                    const startAngle = Math.PI;
+                    const endAngle = -Math.PI / 2;
+                    const sweep = shortestSweep(startAngle, endAngle);
+                    const steps = 32;
+
+                    ctx.setLineDash([]);
+                    ctx.strokeStyle = '#60a5fa';
+                    ctx.beginPath();
+                    for (let i = 0; i <= steps; i++) {
+                        const t = i / steps;
+                        const angle = startAngle + sweep * t;
+                        const basePoint = {
+                            x: baseCenter.x + Math.cos(angle) * radius,
+                            y: baseCenter.y + Math.sin(angle) * radius
+                        };
+                        const worldPoint = applyAffine(origin, axisX, axisY, basePoint);
+                        if (i === 0) ctx.moveTo(worldPoint.x, worldPoint.y);
+                        else ctx.lineTo(worldPoint.x, worldPoint.y);
+                    }
+                    ctx.stroke();
+
+                    ctx.strokeStyle = '#38bdf8';
+                    const drawEdgeLine = (dir, length) => {
+                        const start = add(origin, scale(dir, baseScale * length * 0.5));
+                        const end = add(origin, scale(dir, length * 0.5));
+                        ctx.beginPath();
+                        ctx.moveTo(start.x, start.y);
+                        ctx.lineTo(end.x, end.y);
+                        ctx.stroke();
+                    };
+                    drawEdgeLine(edgeOut, lenOut);
+                    drawEdgeLine(edgeIn, lenIn);
+                }
+                console.groupEnd();
+
+                ctx.fillStyle = '#e5e7eb';
+                state.points.forEach(pt => {
+                    ctx.beginPath();
+                    ctx.arc(pt.x, pt.y, 4 * pixelScale, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+            };
+
+            const toCanvasPoint = (event) => {
+                const rect = canvas.getBoundingClientRect();
+                const scale = canvas.width / rect.width;
+                return {
+                    x: (event.clientX - rect.left) * scale,
+                    y: (event.clientY - rect.top) * scale
+                };
+            };
+
+            const hitTest = (point) => {
+                const radius = 8 * (canvas.width / canvas.getBoundingClientRect().width);
+                for (let i = 0; i < state.points.length; i++) {
+                    const pt = state.points[i];
+                    if (Math.hypot(point.x - pt.x, point.y - pt.y) <= radius) {
+                        return i;
+                    }
+                }
+                return null;
+            };
+
+            canvas.addEventListener('pointerdown', (event) => {
+                const pos = toCanvasPoint(event);
+                const hit = hitTest(pos);
+                if (hit === null) return;
+                state.draggingIndex = hit;
+                canvas.setPointerCapture(event.pointerId);
+                draw();
+            });
+
+            canvas.addEventListener('pointermove', (event) => {
+                if (state.draggingIndex === null) return;
+                const pos = toCanvasPoint(event);
+                const pt = state.points[state.draggingIndex];
+                pt.x = pos.x;
+                pt.y = pos.y;
+                draw();
+            });
+
+            canvas.addEventListener('pointerup', (event) => {
+                if (state.draggingIndex === null) return;
+                state.draggingIndex = null;
+                canvas.releasePointerCapture(event.pointerId);
+                draw();
+            });
+
+            slider.addEventListener('input', () => {
+                state.desiredScale = Number(slider.value);
+                updateSliderLabel();
+                draw();
+            });
+
+            initPoints();
+            draw();
+            window.addEventListener('resize', draw);
+        };
+
+        const slider = document.getElementById('length-slider');
+        const valueLabel = document.getElementById('length-value');
+        const toggle = document.getElementById('mode-toggle');
+        createScenario(document.getElementById('canvas-main'), slider, valueLabel, toggle);
+    </script>
+</body>
+</html>
