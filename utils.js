@@ -209,7 +209,7 @@ export function calculateCornerRadiusPath(points, closed = false, radiusMode = '
     const path = [];
     const corners = [];
 
-    const buildCorner = (i) => {
+        const buildCorner = (i) => {
         const prev = points[(i - 1 + count) % count];
         const curr = points[i];
         const next = points[(i + 1) % count];
@@ -304,7 +304,7 @@ export function calculateCornerRadiusPath(points, closed = false, radiusMode = '
     return path;
 }
 
-const addAffineArcPoints = (path, origin, axisX, axisY, baseScale, segments, includeStart) => {
+const addAffineArcPoints = (path, origin, axisX, axisY, baseScale, segments, includeStart, pushFn = null) => {
     const radius = baseScale * 0.5;
     if (radius <= 1e-6) return;
     const center = { x: radius, y: radius };
@@ -319,14 +319,19 @@ const addAffineArcPoints = (path, origin, axisX, axisY, baseScale, segments, inc
             x: center.x + Math.cos(angle) * radius,
             y: center.y + Math.sin(angle) * radius
         };
-        path.push({
+        const point = {
             x: origin.x + axisX.x * basePoint.x + axisY.x * basePoint.y,
             y: origin.y + axisX.y * basePoint.x + axisY.y * basePoint.y
-        });
+        };
+        if (pushFn) {
+            pushFn(point);
+        } else {
+            path.push(point);
+        }
     }
 };
 
-export function calculateAffineCornerRadiusPath(points, closed = false, radiusMode = 'relative', radiusValue = 0, segments = DEFAULT_SEGMENTS, arcsOnly = false) {
+export function calculateAffineCornerRadiusPath(points, closed = false, radiusMode = 'relative', radiusValue = 0, segments = DEFAULT_SEGMENTS, arcsOnly = false, anchorMode = false, controlMode = false, includeTags = false) {
     if (points.length < 2) return points;
     if (radiusValue <= 1e-6) {
         return closed ? [...points, points[0]] : [...points];
@@ -336,6 +341,7 @@ export function calculateAffineCornerRadiusPath(points, closed = false, radiusMo
     const corners = [];
 
     const normalizedMode = radiusMode === 'fixed' ? 'absolute' : radiusMode;
+    const effectiveMode = normalizedMode === 'absolute' ? 'relative' : normalizedMode;
 
     const buildCorner = (i) => {
         const prev = points[(i - 1 + count) % count];
@@ -351,22 +357,30 @@ export function calculateAffineCornerRadiusPath(points, closed = false, radiusMo
         let baseScale;
         let axisX;
         let axisY;
-        if (normalizedMode === 'absolute') {
-            const minEdge = Math.min(lenIn, lenOut);
-            const clampedRadius = Math.max(0, Math.min(radiusValue, minEdge * 0.5));
-            baseScale = clampedRadius * 2;
+        const maxRadius = Math.min(lenIn, lenOut) * 0.5;
+        if (effectiveMode === 'absolute') {
+            baseScale = Math.max(0, Math.min(1, radiusValue));
             axisX = normalize(edgeOut);
             axisY = normalize(edgeIn);
         } else {
-            baseScale = Math.max(0, Math.min(1, radiusValue));
-            axisX = edgeOut;
-            axisY = edgeIn;
+            if (normalizedMode === 'absolute') {
+                const clampedRadius = Math.max(0, Math.min(radiusValue, maxRadius));
+                baseScale = clampedRadius * 2;
+            } else {
+                baseScale = Math.max(0, Math.min(1, radiusValue));
+            }
+            axisX = normalizedMode === 'absolute' ? normalize(edgeOut) : edgeOut;
+            axisY = normalizedMode === 'absolute' ? normalize(edgeIn) : edgeIn;
         }
 
         if (baseScale <= 1e-6) return null;
         const radius = baseScale * 0.5;
-        const midInDistance = normalizedMode === 'absolute' ? lenIn * 0.5 : 0.5;
-        const midOutDistance = normalizedMode === 'absolute' ? lenOut * 0.5 : 0.5;
+        const midInDistance = controlMode
+            ? -radius
+            : (normalizedMode === 'absolute' ? lenIn * 0.5 : 0.5);
+        const midOutDistance = controlMode
+            ? -radius
+            : (normalizedMode === 'absolute' ? lenOut * 0.5 : 0.5);
         const midIn = {
             x: curr.x + axisY.x * midInDistance,
             y: curr.y + axisY.y * midInDistance
@@ -375,7 +389,88 @@ export function calculateAffineCornerRadiusPath(points, closed = false, radiusMo
             x: curr.x + axisX.x * midOutDistance,
             y: curr.y + axisX.y * midOutDistance
         };
-        return { origin: curr, axisX, axisY, baseScale, radius, midIn, midOut };
+        const dirIn = normalize(axisY);
+        const dirOut = normalize(axisX);
+        const bisectorRaw = { x: dirIn.x + dirOut.x, y: dirIn.y + dirOut.y };
+        const bisectorLen = Math.hypot(bisectorRaw.x, bisectorRaw.y);
+        const bisector = bisectorLen > 1e-6
+            ? { x: bisectorRaw.x / bisectorLen, y: bisectorRaw.y / bisectorLen }
+            : { x: 0, y: 0 };
+        const worldRadius = normalizedMode === 'absolute'
+            ? radius
+            : radius * Math.min(lenIn, lenOut);
+        const bisectorOuter = {
+            x: curr.x - bisector.x * (worldRadius / Math.sqrt(2)),
+            y: curr.y - bisector.y * (worldRadius / Math.sqrt(2))
+        };
+        const perpInRaw = { x: -dirIn.y, y: dirIn.x };
+        const perpOutRaw = { x: -dirOut.y, y: dirOut.x };
+        const perpIn = (perpInRaw.x * bisector.x + perpInRaw.y * bisector.y) < 0
+            ? { x: -perpInRaw.x, y: -perpInRaw.y }
+            : perpInRaw;
+        const perpOut = (perpOutRaw.x * bisector.x + perpOutRaw.y * bisector.y) < 0
+            ? { x: -perpOutRaw.x, y: -perpOutRaw.y }
+            : perpOutRaw;
+        const orthoOffsetIn = (normalizedMode === 'absolute' ? radius : radius * lenIn) / Math.sqrt(2);
+        const orthoOffsetOut = (normalizedMode === 'absolute' ? radius : radius * lenOut) / Math.sqrt(2);
+        const midInOrtho = {
+            x: curr.x + dirIn.x * (lenIn * 0.5) + perpIn.x * orthoOffsetIn,
+            y: curr.y + dirIn.y * (lenIn * 0.5) + perpIn.y * orthoOffsetIn
+        };
+        const midOutOrtho = {
+            x: curr.x + dirOut.x * (lenOut * 0.5) + perpOut.x * orthoOffsetOut,
+            y: curr.y + dirOut.y * (lenOut * 0.5) + perpOut.y * orthoOffsetOut
+        };
+        const arcStart = {
+            x: curr.x + axisY.x * radius,
+            y: curr.y + axisY.y * radius
+        };
+        const arcEnd = {
+            x: curr.x + axisX.x * radius,
+            y: curr.y + axisX.y * radius
+        };
+        return {
+            index: i,
+            origin: curr,
+            axisX,
+            axisY,
+            baseScale,
+            radius,
+            edgeInIndex: (i - 1 + count) % count,
+            edgeOutIndex: i,
+            midIn,
+            midOut,
+            arcStart,
+            arcEnd,
+            bisectorOuter,
+            midInOrtho,
+            midOutOrtho
+        };
+    };
+
+    const pushPoint = (pt, tag = null, edgeIndex = null) => {
+        if (!includeTags) {
+            path.push({ x: pt.x, y: pt.y });
+            return;
+        }
+        path.push({
+            x: pt.x,
+            y: pt.y,
+            tag: tag || undefined,
+            edgeIndex: edgeIndex ?? undefined
+        });
+    };
+    const pushArc = (pt) => pushPoint(pt, 'arc');
+
+    const addControlHelpers = (corner, beforeArc) => {
+        if (!controlMode || corner.radius <= 1e-6) return;
+        if (beforeArc) {
+            pushPoint(corner.midInOrtho, 'line', corner.edgeInIndex);
+            pushPoint(corner.bisectorOuter, 'corner');
+        } else {
+            pushPoint(corner.bisectorOuter, 'corner');
+            pushPoint(corner.midOutOrtho, 'line', corner.edgeOutIndex);
+        }
     };
 
     if (closed) {
@@ -384,48 +479,192 @@ export function calculateAffineCornerRadiusPath(points, closed = false, radiusMo
             if (corner) corners.push(corner);
         }
         if (!corners.length) return [...points, points[0]];
+        if (controlMode) {
+            const firstCorner = corners[0];
+            pushPoint(firstCorner.arcStart, 'line', firstCorner.edgeInIndex);
+            addAffineArcPoints(path, firstCorner.origin, firstCorner.axisX, firstCorner.axisY, firstCorner.baseScale, segments, false, pushArc);
+            for (let i = 1; i < corners.length; i++) {
+                const corner = corners[i];
+                pushPoint(corner.arcStart, 'line', corner.edgeInIndex);
+                addAffineArcPoints(path, corner.origin, corner.axisX, corner.axisY, corner.baseScale, segments, false, pushArc);
+            }
+            pushPoint({ ...firstCorner.arcStart }, 'line', firstCorner.edgeInIndex);
+            return path;
+        }
         const firstCorner = corners[0];
-        path.push(firstCorner.midIn);
+        pushPoint(firstCorner.midIn, 'line', firstCorner.edgeInIndex);
+        addControlHelpers(firstCorner, true);
         corners.forEach((corner, index) => {
-            if (index > 0) path.push(corner.midIn);
-            addAffineArcPoints(path, corner.origin, corner.axisX, corner.axisY, corner.baseScale, segments, true);
-            path.push(corner.midOut);
+            if (index > 0) {
+                pushPoint(corner.midIn, 'line', corner.edgeInIndex);
+                addControlHelpers(corner, true);
+            }
+            addAffineArcPoints(path, corner.origin, corner.axisX, corner.axisY, corner.baseScale, segments, true, pushArc);
+            addControlHelpers(corner, false);
+            pushPoint(corner.midOut, 'line', corner.edgeOutIndex);
+            pushPoint(corner.origin, 'corner');
         });
-        path.push({ ...firstCorner.midIn });
+        pushPoint({ ...firstCorner.midIn }, 'line', firstCorner.edgeInIndex);
         return path;
     }
 
-    if (normalizedMode === 'absolute') {
+    if (effectiveMode === 'absolute') {
         for (let i = 1; i < count - 1; i++) {
             const corner = buildCorner(i);
             if (corner) corners.push(corner);
         }
         if (!corners.length) return [...points];
         const firstCorner = corners[0];
-        path.push(points[0]);
-        path.push(firstCorner.midIn);
+        pushPoint(points[0], 'line', 0);
+        if (firstCorner) {
+            pushPoint(firstCorner.midIn, 'line', firstCorner.edgeInIndex);
+        }
+        addControlHelpers(firstCorner, true);
         corners.forEach((corner, index) => {
-            if (index > 0) path.push(corner.midIn);
-            addAffineArcPoints(path, corner.origin, corner.axisX, corner.axisY, corner.baseScale, segments, true);
-            path.push(corner.midOut);
+            if (index > 0) {
+                pushPoint(corner.midIn, 'line', corner.edgeInIndex);
+                addControlHelpers(corner, true);
+            }
+            addAffineArcPoints(path, corner.origin, corner.axisX, corner.axisY, corner.baseScale, segments, true, pushArc);
+            addControlHelpers(corner, false);
+            pushPoint(corner.midOut, 'line', corner.edgeOutIndex);
         });
-        path.push(points[count - 1]);
+        const lastCorner = corners[corners.length - 1];
+        if (lastCorner) {
+            pushPoint(lastCorner.midOut, 'line', lastCorner.edgeOutIndex);
+        }
+        pushPoint(points[count - 1], 'line', count - 2);
         return path;
     }
 
-    path.push(points[0]);
+    if (controlMode) {
+        for (let i = 1; i < count - 1; i++) {
+            const corner = buildCorner(i);
+            if (corner) corners.push(corner);
+        }
+        if (!corners.length) return [...points];
+        pushPoint(points[0], 'line', 0);
+        const firstCorner = corners[0];
+        pushPoint(firstCorner.arcStart, 'line', firstCorner.edgeInIndex);
+        addAffineArcPoints(path, firstCorner.origin, firstCorner.axisX, firstCorner.axisY, firstCorner.baseScale, segments, false, pushArc);
+        for (let i = 1; i < corners.length; i++) {
+            const corner = corners[i];
+            pushPoint(corner.arcStart, 'line', corner.edgeInIndex);
+            addAffineArcPoints(path, corner.origin, corner.axisX, corner.axisY, corner.baseScale, segments, false, pushArc);
+        }
+        pushPoint(points[count - 1], 'line', count - 2);
+        return path;
+    }
+
     for (let i = 1; i < count - 1; i++) {
         const corner = buildCorner(i);
-        if (!corner) {
-            path.push(points[i]);
-            continue;
-        }
-        path.push(corner.midIn);
-        addAffineArcPoints(path, corner.origin, corner.axisX, corner.axisY, corner.baseScale, segments, true);
-        path.push(corner.midOut);
+        if (corner) corners.push(corner);
     }
-    path.push(points[count - 1]);
+    if (!corners.length) {
+        return [...points];
+    }
+    const firstCorner = corners[0];
+    const lastCorner = corners[corners.length - 1];
+    pushPoint(points[0], 'line', 0);
+    pushPoint(firstCorner.midIn, 'line', firstCorner.edgeInIndex);
+    corners.forEach((corner, index) => {
+        if (index > 0) {
+            pushPoint(corner.midIn, 'line', corner.edgeInIndex);
+        }
+        addControlHelpers(corner, true);
+        addAffineArcPoints(path, corner.origin, corner.axisX, corner.axisY, corner.baseScale, segments, true, pushArc);
+        addControlHelpers(corner, false);
+        pushPoint(corner.midOut, 'line', corner.edgeOutIndex);
+    });
+    pushPoint(lastCorner.midOut, 'line', lastCorner.edgeOutIndex);
+    pushPoint(points[count - 1], 'line', count - 2);
     return path;
+}
+
+export function getRadiusControlHelpers(points, closed = false, radiusMode = 'relative', radiusValue = 0) {
+    if (points.length < 3) return [];
+    if (radiusValue <= 1e-6) return [];
+    const count = points.length;
+    const helpers = [];
+    const normalizedMode = radiusMode === 'fixed' ? 'absolute' : radiusMode;
+    const effectiveMode = normalizedMode === 'absolute' ? 'relative' : normalizedMode;
+    const last = closed ? count : count - 1;
+    for (let i = 1; i < last; i++) {
+        const prev = points[(i - 1 + count) % count];
+        const curr = points[i];
+        const next = points[(i + 1) % count];
+        const edgeIn = sub(prev, curr);
+        const edgeOut = sub(next, curr);
+        const lenIn = Math.hypot(edgeIn.x, edgeIn.y);
+        const lenOut = Math.hypot(edgeOut.x, edgeOut.y);
+        if (lenIn <= 1e-6 || lenOut <= 1e-6) continue;
+
+        const maxRadius = Math.min(lenIn, lenOut) * 0.5;
+        let baseScale;
+        let axisX;
+        let axisY;
+        if (effectiveMode === 'absolute') {
+            const minEdge = Math.min(lenIn, lenOut);
+            const clampedRadius = Math.max(0, Math.min(radiusValue, minEdge * 0.5));
+            baseScale = clampedRadius * 2;
+            axisX = normalize(edgeOut);
+            axisY = normalize(edgeIn);
+        } else {
+            baseScale = normalizedMode === 'absolute'
+                ? Math.max(0, Math.min(radiusValue, maxRadius)) * 2
+                : Math.max(0, Math.min(1, radiusValue));
+            axisX = normalizedMode === 'absolute' ? normalize(edgeOut) : edgeOut;
+            axisY = normalizedMode === 'absolute' ? normalize(edgeIn) : edgeIn;
+        }
+        if (baseScale <= 1e-6) continue;
+        const radius = baseScale * 0.5;
+        const dirIn = normalize(axisY);
+        const dirOut = normalize(axisX);
+        const bisectorRaw = { x: dirIn.x + dirOut.x, y: dirIn.y + dirOut.y };
+        const bisectorLen = Math.hypot(bisectorRaw.x, bisectorRaw.y);
+        const bisector = bisectorLen > 1e-6
+            ? { x: bisectorRaw.x / bisectorLen, y: bisectorRaw.y / bisectorLen }
+            : { x: 0, y: 0 };
+        const worldRadius = normalizedMode === 'absolute'
+            ? radius
+            : radius * Math.min(lenIn, lenOut);
+        const orientation = closed ? (() => {
+            let area = 0;
+            for (let k = 0; k < count; k++) {
+                const a = points[k];
+                const b = points[(k + 1) % count];
+                area += a.x * b.y - b.x * a.y;
+            }
+            return area;
+        })() : 1;
+        const cross = (curr.x - prev.x) * (next.y - curr.y) - (curr.y - prev.y) * (next.x - curr.x);
+        const isConvex = orientation >= 0 ? cross >= 0 : cross <= 0;
+        const bisectorSign = isConvex ? -1 : 1;
+        const bisectorPoint = {
+            x: curr.x + bisector.x * worldRadius * bisectorSign,
+            y: curr.y + bisector.y * worldRadius * bisectorSign
+        };
+        const perpInRaw = { x: -dirIn.y, y: dirIn.x };
+        const perpOutRaw = { x: -dirOut.y, y: dirOut.x };
+        const perpIn = (perpInRaw.x * bisector.x + perpInRaw.y * bisector.y) < 0
+            ? { x: -perpInRaw.x, y: -perpInRaw.y }
+            : perpInRaw;
+        const perpOut = (perpOutRaw.x * bisector.x + perpOutRaw.y * bisector.y) < 0
+            ? { x: -perpOutRaw.x, y: -perpOutRaw.y }
+            : perpOutRaw;
+        const orthoOffsetIn = (normalizedMode === 'absolute' ? radius : radius * lenIn) / Math.sqrt(2);
+        const orthoOffsetOut = (normalizedMode === 'absolute' ? radius : radius * lenOut) / Math.sqrt(2);
+        const midInOrtho = {
+            x: curr.x + dirIn.x * (lenIn * 0.5) + perpIn.x * orthoOffsetIn,
+            y: curr.y + dirIn.y * (lenIn * 0.5) + perpIn.y * orthoOffsetIn
+        };
+        const midOutOrtho = {
+            x: curr.x + dirOut.x * (lenOut * 0.5) + perpOut.x * orthoOffsetOut,
+            y: curr.y + dirOut.y * (lenOut * 0.5) + perpOut.y * orthoOffsetOut
+        };
+        helpers.push(bisectorPoint, midInOrtho, midOutOrtho);
+    }
+    return helpers;
 }
 
 const buildUniformKnotVector = (count, degree) => {

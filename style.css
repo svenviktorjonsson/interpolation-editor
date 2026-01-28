@@ -137,6 +137,11 @@
     color: #ffffff;
 }
 
+.toggle-button.is-disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
 .toggle-stack {
     display: flex;
     flex-direction: column;

@@ -1,103 +1,48 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Interpolation Editor Test Page</title>
-    
-    <link rel="stylesheet" href="style.css">
-    
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Interpolation Editor Test</title>
+    <link rel="stylesheet" href="./style.css" />
     <style>
-        /* Basic styles for the test page */
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: #1a202c;
-            color: #e2e8f0;
-            margin: 0;
-            padding: 1rem;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-        
-        .content {
-            text-align: center;
-            margin-top: 2rem;
-        }
-        
-        .instructions {
-            margin: 1rem 0;
-            font-size: 0.9rem;
-            color: #a0aec0;
-            max-width: 600px;
-        }
-        
-        #open-editor-button {
-            font-size: 1rem;
-            font-weight: 500;
-            padding: 0.75rem 1.5rem;
-            cursor: pointer;
-            border-radius: 0.5rem;
-            border: none;
-            background-color: #3b82f6;
-            color: white;
-            transition: background-color 0.2s;
-        }
-        
-        #open-editor-button:hover {
-            background-color: #2563eb;
-        }
-
-        .output-section {
-            margin-top: 2rem;
-            width: 100%;
-            max-width: 600px;
-        }
-
-        .output-label {
-            font-size: 0.8rem;
-            color: #a0aec0;
-            margin-bottom: 0.5rem;
-        }
-
-        #output-display-wrapper {
-            background-color: #2d3748;
-            border: 1px solid #4a5568;
-            border-radius: 0.375rem;
-            padding: 1rem;
-            min-height: 100px;
-            cursor: pointer;
-        }
-
-        #output-display {
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            font-family: monospace;
-            font-size: 0.8rem;
-            color: #cbd5e0;
-        }
-
+      body {
+        margin: 0;
+        font-family: Arial, sans-serif;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      #page {
+        padding: 20px;
+      }
+      #open-editor-button {
+        padding: 8px 12px;
+        border: none;
+        border-radius: 4px;
+        background: #3b82f6;
+        color: #fff;
+        cursor: pointer;
+      }
+      #output-display-wrapper {
+        margin-top: 16px;
+        padding: 12px;
+        background: #1f2937;
+        border-radius: 6px;
+      }
+      #output-display {
+        white-space: pre-wrap;
+        font-family: Consolas, monospace;
+        font-size: 13px;
+      }
     </style>
-</head>
-<body>
-    
-    <div class="content">
-        <h1>Interpolation Editor Test</h1>
-        <div class="instructions">
-            <p>Click the button to open the interpolation style editor.</p>
-            <p>Click <strong>"Select"</strong> to see the resulting style object below.</p>
-            <p>Double-click the output area to re-open the editor with the last saved style.</p>
-        </div>
-        <button id="open-editor-button">Open Interpolation Editor</button>
+  </head>
+  <body>
+    <div id="page">
+      <button id="open-editor-button">Open Editor</button>
+      <div id="output-display-wrapper">
+        <div id="output-display">No style saved yet.</div>
+      </div>
     </div>
-
-    <div class="output-section">
-        <div class="output-label">Current Interpolation Style (Double-click to edit)</div>
-        <div id="output-display-wrapper">
-            <pre><code id="output-display">No style saved yet.</code></pre>
-        </div>
-    </div>
-
-    <script type="module" src="test-app.js?v=dev"></script>
-</body>
+    <script type="module" src="./test-app.js"></script>
+  </body>
 </html>
