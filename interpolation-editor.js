@@ -518,6 +518,7 @@ export default class InterpolationEditor {
     _exportStyleForHost() {
         const {
             id,
+            name,
             type,
             tension,
             radiusMode,
@@ -525,13 +526,16 @@ export default class InterpolationEditor {
             pointHandling,
             order,
             preset,
-            mode
+            mode,
+            linearStyle
         } = this.state.style;
         const base = {
             id,
+            name,
             order,
             preset,
-            mode
+            mode,
+            linearStyle
         };
         if (type === 'spline') {
             return {
