@@ -988,20 +988,7 @@ export default class InterpolationEditor {
                 boundaryFillPoints = drawPoints;
             }
 
-            if (this.state.style.mode === 'radius'
-                && this.state.style.pointHandling === 'anchor') {
-                const helpers = U.getRadiusControlHelpers(points, path.closed, this.state.style.radiusMode, this.state.style.radiusValue);
-                if (helpers.length) {
-                    ctx.save();
-                    ctx.fillStyle = '#f87171';
-                    helpers.forEach(pt => {
-                        ctx.beginPath();
-                        ctx.arc(pt.x, pt.y, 3, 0, Math.PI * 2);
-                        ctx.fill();
-                    });
-                    ctx.restore();
-                }
-            }
+            // Removed radius helper dots for cleaner preview.
 
             if (this.state.style.type === 'linear' && this.state.style.linearStyle === 'arrows') {
                 this._drawEdgeArrows(ctx, points, path.closed);
