@@ -198,7 +198,6 @@ export default class InterpolationEditor {
         });
         ctx.stroke();
 
-        // Draw original points
         ctx.fillStyle = C.PREVIEW_PATH_COLOR;
         samplePoints.forEach(p => {
             ctx.beginPath();
