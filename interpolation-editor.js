@@ -108,10 +108,10 @@ export default class InterpolationEditor {
             tensionSliderContainer
         );
         
-        const buttonRow = createEl('div', { className: 'button-row' });
+        const buttonRow = createEl('div', { className: 'button-container' });
         buttonRow.append(
-            createEl('button', { id: 'cancel-button', className: 'editor-button secondary', text: 'Cancel' }),
-            createEl('button', { id: 'save-button', className: 'editor-button primary', text: 'Save Style' })
+            createEl('button', { id: 'close-button', className: 'close-button', text: 'Close' }),
+            createEl('button', { id: 'select-button', className: 'select-button', text: 'Select' })
         );
 
         optionsPanel.append(optionsHeader, cornerGroup, tensionGroup, buttonRow);
@@ -121,7 +121,7 @@ export default class InterpolationEditor {
     }
 
     _setupEventListeners() {
-        const { tensionSlider, tensionInput, saveButton, cancelButton, styleNameInput } = this.elements;
+        const { tensionSlider, tensionInput, styleNameInput } = this.elements;
 
         styleNameInput.addEventListener('change', (e) => {
             this.state.style.name = e.target.value;
@@ -146,13 +146,13 @@ export default class InterpolationEditor {
         tensionSlider.addEventListener('input', (e) => syncTension(e.target.value));
         tensionInput.addEventListener('change', (e) => syncTension(e.target.value));
         
-        saveButton.addEventListener('click', () => {
+        this.elements.selectButton.addEventListener('click', () => {
             this.state.style.name = this.elements.styleNameInput.value;
             this.onSelect(this.state.style);
             this.hide();
         });
-        
-        cancelButton.addEventListener('click', () => {
+
+        this.elements.closeButton.addEventListener('click', () => {
             this.hide();
         });
     }
@@ -167,6 +167,20 @@ export default class InterpolationEditor {
         tensionInput.value = style.tension;
     }
 
+    _drawCheckerboard(ctx, x, y, width, height) {
+        const size = C.CHECKERBOARD_SIZE;
+        const dark = C.COLOR_CHECKER_DARK;
+        const light = C.COLOR_CHECKER_LIGHT;
+        const cols = Math.ceil(width / size) + 1;
+        const rows = Math.ceil(height / size) + 1;
+        for (let row = 0; row < rows; row++) {
+            for (let col = 0; col < cols; col++) {
+                ctx.fillStyle = (row + col) % 2 === 0 ? dark : light;
+                ctx.fillRect(x + col * size, y + row * size, size, size);
+            }
+        }
+    }
+
     drawPreview() {
         if (!this.previewCtx) return;
 
@@ -174,9 +188,8 @@ export default class InterpolationEditor {
         const w = this.elements.previewCanvas.width;
         const h = this.elements.previewCanvas.height;
 
-        // Clear canvas
-        ctx.fillStyle = C.PREVIEW_BACKGROUND_COLOR;
-        ctx.fillRect(0, 0, w, h);
+        ctx.clearRect(0, 0, w, h);
+        this._drawCheckerboard(ctx, 0, 0, w, h);
 
         // Draw sample path (e.g., a simple 'S' curve)
         const samplePoints = [

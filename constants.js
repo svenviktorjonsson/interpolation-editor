@@ -38,7 +38,11 @@ export const DEFAULT_STYLE = {
     tension: 0.5, // Specific to cubic splines
 };
 
-// UI and Preview canvas constants
+// UI and Preview canvas constants (aligned with colormap-selector)
+export const CHECKERBOARD_SIZE = 8;
+export const COLOR_CHECKER_DARK = '#4a5568';
+export const COLOR_CHECKER_LIGHT = '#718096';
+
 export const PREVIEW_CANVAS_WIDTH = 256;
 export const PREVIEW_CANVAS_HEIGHT = 256;
 export const PREVIEW_BACKGROUND_COLOR = '#2D3748';
