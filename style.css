@@ -1,62 +1,92 @@
 /* ========== INTERPOLATION EDITOR (aligned with colormap-selector) ========== */
+/* 6 columns like colormap so cell widths match: [2x2 presets][2x1 type][1x1 params;1x1 actions] */
+
+:root {
+    --editor-bg: #1a202c;
+    --panel-bg: rgba(45, 55, 72, 0.5);
+    --panel-header-bg: #3a4652;
+    --panel-border: #4a5568;
+    --text-primary: #e2e8f0;
+    --text-muted: #a0aec0;
+    --accent: #3b82f6;
+}
 
 .interpolation-editor-container {
     position: absolute;
     right: 0.5rem;
     bottom: 0.5rem;
-    font-family: 'Inter', sans-serif;
-    user-select: none;
-    background-color: #1a202c;
-    color: #e2e8f0;
-    padding: 0.5rem;
-    border-radius: 0.5rem;
-    box-shadow: 0 10px 25px rgba(0,0,0,0.3);
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    grid-template-rows: repeat(2, 1fr);
-    gap: 0.375rem;
-    width: 800px;
-    height: 400px;
-    max-width: calc(100% - 1rem);
-    max-height: 50vh;
+    z-index: 1000;
+    width: 1100px;
+    height: 50vh;
+    max-width: 90vw;
     min-height: 400px;
     min-width: 600px;
+    background-color: var(--editor-bg);
+    border-radius: 0.5rem;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+    padding: 0.5rem;
     box-sizing: border-box;
-    z-index: 1000;
+    font-family: 'Inter', sans-serif;
+    color: var(--text-primary);
 }
 
-/* ========== PANELS & HEADERS ========== */
+.interpolation-editor-layout {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    grid-template-rows: minmax(200px, 1fr) minmax(200px, 1fr);
+    gap: 0.375rem;
+    height: 100%;
+    width: 100%;
+    box-sizing: border-box;
+}
+
 .editor-panel {
-    background-color: rgba(45, 55, 72, 0.5);
-    border-radius: 0.375rem;
     display: flex;
     flex-direction: column;
+    background-color: var(--panel-bg);
+    border-radius: 0.375rem;
     overflow: hidden;
-    padding: 0.375rem;
-    gap: 0.75rem;
+    min-height: 0;
+    padding: 0;
 }
 
+/* Column 1–2: Presets [2x2] – same width as colormap’s HS pane */
 .preview-panel {
-    grid-column: 1 / 3;
-    grid-row: 1 / 3;
+    grid-column: 1 / span 2;
+    grid-row: 1 / span 2;
 }
 
-.style-panel {
-    grid-column: 3 / 5;
-    grid-row: 1 / 2;
-}
-
-.options-panel {
-    grid-column: 3 / 5;
-    grid-row: 2 / 3;
+/* Column 3–4: Interpolation Type [2x2] – same width as colormap’s lightness/alpha column */
+.type-panel {
+    grid-column: 3 / span 2;
+    grid-row: 1 / span 2;
     overflow-y: auto;
     scrollbar-width: thin;
     scrollbar-color: #4a5568 #2d3748;
 }
 
-.options-panel::-webkit-scrollbar { width: 6px; }
-.options-panel::-webkit-scrollbar-track { background: #2d3748; }
-.options-panel::-webkit-scrollbar-thumb { background-color: #4a5568; border-radius: 3px; }
+.type-panel::-webkit-scrollbar { width: 6px; }
+.type-panel::-webkit-scrollbar-track { background: #2d3748; }
+.type-panel::-webkit-scrollbar-thumb { background-color: #4a5568; border-radius: 3px; }
+
+/* Column 5: Parameters [1x1] – same width as colormap’s selected color cell */
+.params-panel {
+    grid-column: 5 / span 1;
+    grid-row: 1 / span 1;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #4a5568 #2d3748;
+}
+
+.params-panel::-webkit-scrollbar { width: 6px; }
+.params-panel::-webkit-scrollbar-track { background: #2d3748; }
+.params-panel::-webkit-scrollbar-thumb { background-color: #4a5568; border-radius: 3px; }
+
+/* Column 5 bottom: Actions [1x1] */
+.actions-panel {
+    grid-column: 5 / span 1;
+    grid-row: 2 / span 1;
+}
 
 .panel-header {
     display: flex;
@@ -66,115 +96,166 @@
     height: 28px;
     font-size: 0.7rem;
     font-weight: 600;
-    color: #a0aec0;
+    color: var(--text-muted);
     text-transform: uppercase;
-    background-color: #3a4652;
+    background-color: var(--panel-header-bg);
     border-radius: 0.375rem 0.375rem 0 0;
     padding: 0 6px;
-    margin: -0.375rem -0.375rem 0;
-    border-bottom: none;
+    margin: 0;
 }
 
-.preview-canvas-container {
+.preview-list {
+    padding: 0.25rem;
     flex-grow: 1;
-    background: transparent;
-    border-radius: 0.25rem;
-    overflow: hidden;
-}
-
-#preview-canvas {
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #4a5568 #2d3748;
     width: 100%;
-    height: 100%;
-    border-radius: 0.25rem;
+    box-sizing: border-box;
 }
 
-/* ========== CONTROL GROUPS ========== */
-.parameter-group {
+.preview-list::-webkit-scrollbar { width: 6px; }
+.preview-list::-webkit-scrollbar-track { background: #2d3748; }
+.preview-list::-webkit-scrollbar-thumb { background-color: #4a5568; border-radius: 3px; }
+
+.preview-card {
+    background-color: transparent;
+    border: 1px solid var(--panel-border);
+    border-radius: 0.375rem;
+    padding: 0.4rem;
     display: flex;
     flex-direction: column;
-    gap: 0.375rem;
+    gap: 0.3rem;
+    cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    min-height: 140px;
+    margin-bottom: 0.25rem;
+    width: 100%;
+    box-sizing: border-box;
 }
 
-.parameter-group-header {
-    font-size: 0.7rem;
-    font-weight: 600;
-    color: #a0aec0;
-    text-transform: uppercase;
-    padding-bottom: 0.25rem;
-    border-bottom: 1px solid #4a5568;
+.preview-card:last-child { margin-bottom: 0; }
+
+.preview-card.is-active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.5);
 }
 
-/* ========== BUTTONS & INPUTS ========== */
-.radio-button-group {
+.preview-card:focus { outline: none; }
+
+.preview-card-canvas {
+    width: 100%;
+    height: 100px;
+    border-radius: 0.25rem;
+    background: transparent;
+    border: 1px solid rgba(0, 0, 0, 0.2);
+}
+
+.preview-card-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-align: left;
+}
+
+.toggle-group {
     display: flex;
     gap: 0.25rem;
+    margin: 0.4rem;
     background-color: #4a5568;
     border-radius: 0.25rem;
     padding: 2px;
 }
 
-.radio-button-group label {
+.toggle-button {
     flex: 1;
-    padding: 4px;
+    padding: 6px 8px;
     font-size: 0.75rem;
-    text-align: center;
-    color: #a0aec0;
-    background-color: transparent;
+    color: var(--text-muted);
+    background: transparent;
+    border: none;
     border-radius: 0.25rem;
     cursor: pointer;
-    transition: all 0.15s ease-in-out;
+    transition: background-color 0.15s ease, color 0.15s ease;
 }
 
-.radio-button-group input[type="radio"] {
-    display: none;
+.toggle-button.is-active {
+    background-color: var(--accent);
+    color: #ffffff;
 }
 
-.radio-button-group input[type="radio"]:checked + label {
-    background-color: #3b82f6;
-    color: white;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+.toggle-button.is-disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 
-.slider-container {
+.toggle-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 0 0.6rem 0.6rem;
+}
+
+.toggle-row {
+    background-color: #2d3748;
+    border: 1px solid var(--panel-border);
+    border-radius: 0.375rem;
+    padding: 8px 10px;
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.toggle-row.is-active {
+    border-color: var(--accent);
+    background-color: rgba(59, 130, 246, 0.15);
+}
+
+.section-caption {
+    margin: 0.4rem 0.6rem 0.25rem;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.param-row {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    padding: 0 0.6rem 0.6rem;
 }
 
-.slider-container input[type="range"] {
-    flex-grow: 1;
-    -webkit-appearance: none;
+.param-row input[type="range"] {
+    flex: 1;
     appearance: none;
-    width: 100%;
     height: 6px;
     background: #4a5568;
     border-radius: 3px;
-    outline: none;
 }
 
-.slider-container input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none;
+.param-row input[type="range"]::-webkit-slider-thumb {
     appearance: none;
     width: 14px;
     height: 14px;
-    background: #3b82f6;
+    background: var(--accent);
     border-radius: 50%;
     cursor: pointer;
 }
 
-.value-input, .slider-container input[type="number"] {
-    font-size: 0.75rem;
-    background-color: #4a5568; 
-    color: #e2e8f0;
-    text-align: center; 
-    border-radius: 0.25rem; 
-    padding: 0.2rem; 
+.param-row input[type="number"] {
+    width: 60px;
+    background-color: #4a5568;
     border: 1px solid #718096;
-}
-.slider-container input[type="number"] {
-    width: 50px;
+    border-radius: 0.25rem;
+    color: var(--text-primary);
+    padding: 0.2rem;
+    font-size: 0.75rem;
+    text-align: center;
+    height: 1.5rem;
+    box-sizing: border-box;
 }
 
+.param-section.is-hidden { display: none; }
 
 /* Same button layout and styles as colormap-selector */
 .button-container {
@@ -200,9 +281,7 @@
     box-sizing: border-box;
 }
 
-.close-button:hover {
-    background-color: #4b5563;
-}
+.close-button:hover { background-color: #4b5563; }
 
 .select-button {
     width: 100%;
@@ -219,6 +298,22 @@
     box-sizing: border-box;
 }
 
-.select-button:hover {
-    background-color: #2563eb;
+.select-button:hover { background-color: #2563eb; }
+
+.select-button:disabled {
+    background-color: #4a5568;
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.panel-disabled {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+@media (max-width: 900px) {
+    .interpolation-editor-container {
+        width: calc(100% - 1rem);
+        height: calc(100% - 1rem);
+    }
 }

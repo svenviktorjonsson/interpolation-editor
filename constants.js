@@ -38,11 +38,7 @@ export const DEFAULT_STYLE = {
     tension: 0.5, // Specific to cubic splines
 };
 
-// UI and Preview canvas constants (aligned with colormap-selector)
-export const CHECKERBOARD_SIZE = 8;
-export const COLOR_CHECKER_DARK = '#4a5568';
-export const COLOR_CHECKER_LIGHT = '#718096';
-
+// UI and Preview canvas constants
 export const PREVIEW_CANVAS_WIDTH = 256;
 export const PREVIEW_CANVAS_HEIGHT = 256;
 export const PREVIEW_BACKGROUND_COLOR = '#2D3748';
@@ -51,3 +47,4 @@ export const PREVIEW_PATH_COLOR = '#A0AEC0';
 export const PREVIEW_CURVE_COLOR = '#3B82F6';
 export const PREVIEW_FILL_COLOR = 'rgba(59, 130, 246, 0.3)';
 export const PREVIEW_POINT_RADIUS = 4;
+export const PREVIEW_DASH_PATTERN = [5, 4];
