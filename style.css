@@ -13,12 +13,12 @@
 
 .interpolation-editor-container {
     position: absolute;
-    right: 0.5rem;
-    bottom: 0.5rem;
+    right: 0;
+    bottom: 0;
     z-index: 1000;
-    width: 1100px;
+    width: min(1100px, calc(100% - 1rem));
     height: 50vh;
-    max-width: 90vw;
+    max-width: calc(100% - 1rem);
     min-height: 400px;
     min-width: 600px;
     background-color: var(--editor-bg);
@@ -28,16 +28,18 @@
     box-sizing: border-box;
     font-family: 'Inter', sans-serif;
     color: var(--text-primary);
+    overflow: visible;
 }
 
 .interpolation-editor-layout {
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
     grid-template-rows: minmax(200px, 1fr) minmax(200px, 1fr);
     gap: 0.375rem;
     height: 100%;
     width: 100%;
     box-sizing: border-box;
+    min-width: 0;
 }
 
 .editor-panel {
@@ -50,10 +52,13 @@
     padding: 0;
 }
 
-/* Column 1–2: Presets [2x2] – same width as colormap’s HS pane */
+/* Column 1–2: Presets [2x2] – twice as wide as type column; presets fill region */
 .preview-panel {
     grid-column: 1 / span 2;
     grid-row: 1 / span 2;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
 }
 
 /* Column 3–4: Interpolation Type [2x2] – same width as colormap’s lightness/alpha column */
@@ -73,6 +78,7 @@
 .params-panel {
     grid-column: 5 / span 1;
     grid-row: 1 / span 1;
+    min-width: 0;
     overflow-y: auto;
     scrollbar-width: thin;
     scrollbar-color: #4a5568 #2d3748;
@@ -86,6 +92,7 @@
 .actions-panel {
     grid-column: 5 / span 1;
     grid-row: 2 / span 1;
+    min-width: 0;
 }
 
 .panel-header {

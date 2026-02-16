@@ -1738,6 +1738,7 @@ export default class InterpolationEditor {
     }
 
     _handlePreviewMouseDown(event, presetId) {
+        if (presetId !== this.state.style.preset) return;
         const hit = this._findHitPoint(event, presetId);
         if (!hit) return;
         this.dragState = hit;
