@@ -80,6 +80,7 @@
     grid-row: 1 / span 1;
     min-width: 0;
     overflow-y: auto;
+    overflow-x: visible;
     scrollbar-width: thin;
     scrollbar-color: #4a5568 #2d3748;
 }
@@ -245,10 +246,12 @@
     align-items: center;
     gap: 0.5rem;
     padding: 0 0.6rem 0.6rem;
+    min-width: 0;
 }
 
 .param-row input[type="range"] {
     flex: 1;
+    min-width: 0;
     appearance: none;
     height: 6px;
     background: #4a5568;
@@ -265,7 +268,8 @@
 }
 
 .param-row input[type="number"] {
-    width: 60px;
+    width: 52px;
+    flex: 0 0 auto;
     background-color: #4a5568;
     border: 1px solid #718096;
     border-radius: 0.25rem;
