@@ -1,5 +1,5 @@
 /* ========== INTERPOLATION EDITOR (aligned with colormap-selector) ========== */
-/* 6 columns like colormap so cell widths match: [2x2 presets][2x1 type][1x1 params;1x1 actions] */
+/* 5 columns: [2x2 presets][2x1 type][1x1 params;1x1 actions] – col 3 (params/actions) spans full width */
 
 :root {
     --editor-bg: #1a202c;
@@ -13,8 +13,8 @@
 
 .interpolation-editor-container {
     position: absolute;
-    right: 0;
-    bottom: 0;
+    right: 0.5rem;
+    bottom: 0.5rem;
     z-index: 1000;
     width: min(1100px, calc(100% - 1rem));
     height: 50vh;
@@ -33,7 +33,7 @@
 
 .interpolation-editor-layout {
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
     grid-template-rows: minmax(200px, 1fr) minmax(200px, 1fr);
     gap: 0.375rem;
     height: 100%;
@@ -74,7 +74,7 @@
 .type-panel::-webkit-scrollbar-track { background: #2d3748; }
 .type-panel::-webkit-scrollbar-thumb { background-color: #4a5568; border-radius: 3px; }
 
-/* Column 5: Parameters [1x1] – same width as colormap’s selected color cell */
+/* Column 5 (last): Parameters [1x1] and Actions [1x1] – full width of third logical column */
 .params-panel {
     grid-column: 5 / span 1;
     grid-row: 1 / span 1;
@@ -88,7 +88,6 @@
 .params-panel::-webkit-scrollbar-track { background: #2d3748; }
 .params-panel::-webkit-scrollbar-thumb { background-color: #4a5568; border-radius: 3px; }
 
-/* Column 5 bottom: Actions [1x1] */
 .actions-panel {
     grid-column: 5 / span 1;
     grid-row: 2 / span 1;
@@ -188,6 +187,22 @@
 .toggle-button.is-active {
     background-color: var(--accent);
     color: #ffffff;
+}
+
+.icon-toggle-group {
+    width: 100%;
+}
+
+.icon-toggle-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 30px;
+    padding: 4px 6px;
+}
+
+.arrow-end-mode-icon {
+    display: block;
 }
 
 .toggle-button.is-disabled {

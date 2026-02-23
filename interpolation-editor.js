@@ -14,6 +14,7 @@ const DEFAULT_STYLE = {
     relRadiusValue: 0.5,
     absRadiusValue: 0.5,
     linearStyle: 'lines',
+    linearArrowEndMode: 'radius',
     nurbsDegree: 3,
     pointHandling: 'anchor'
 };
@@ -160,6 +161,7 @@ export default class InterpolationEditor {
             relRadiusValue,
             absRadiusValue,
             linearStyle: style.linearStyle || base.linearStyle,
+            linearArrowEndMode: style.linearArrowEndMode || base.linearArrowEndMode,
             nurbsDegree: style.nurbsDegree || base.nurbsDegree,
             pointHandling: (inferredType === 'spline'
                 ? 'anchor'
@@ -368,6 +370,31 @@ export default class InterpolationEditor {
         linearRow.append(linearToggle);
         linearSection.append(linearRow);
 
+        const arrowEndSection = createEl('div', { className: 'param-section', id: 'arrow-end-section' });
+        arrowEndSection.append(createEl('div', { className: 'section-caption', text: 'Arrow endpoint mode.' }));
+        const arrowEndRow = createEl('div', { className: 'param-row' });
+        const arrowEndToggle = createEl('div', { className: 'toggle-group icon-toggle-group', id: 'arrow-end-toggle' });
+        const endModes = [
+            { id: 'endpoint', title: 'Arrow tip at endpoint' },
+            { id: 'radius', title: 'Arrow tip one radius before endpoint' },
+            { id: '2radius', title: 'Arrow tip two radii before endpoint' }
+        ];
+        endModes.forEach((mode) => {
+            const button = createEl('button', {
+                className: 'toggle-button icon-toggle-button',
+                attrs: {
+                    'data-arrow-end-mode': mode.id,
+                    type: 'button',
+                    title: mode.title,
+                    'aria-label': mode.title
+                }
+            });
+            button.innerHTML = this._getArrowEndModeIconSvg(mode.id);
+            arrowEndToggle.append(button);
+        });
+        arrowEndRow.append(arrowEndToggle);
+        arrowEndSection.append(arrowEndRow);
+
         const handlingSection = createEl('div', { className: 'param-section', id: 'handling-section' });
         handlingSection.append(createEl('div', { className: 'section-caption', text: 'Point handling.' }));
         const handlingRow = createEl('div', { className: 'param-row' });
@@ -402,7 +429,7 @@ export default class InterpolationEditor {
         nurbsRow.append(this.elements.nurbsDegreeSlider, this.elements.nurbsDegreeInput);
         nurbsSection.append(nurbsRow);
 
-        paramsPanel.append(linearSection, handlingSection, tensionSection, radiusSection, nurbsSection);
+        paramsPanel.append(linearSection, arrowEndSection, handlingSection, tensionSection, radiusSection, nurbsSection);
 
         const actionsPanel = createEl('div', { className: 'editor-panel actions-panel' });
         actionsPanel.append(createEl('div', { className: 'panel-header', text: 'Actions' }));
@@ -444,6 +471,13 @@ export default class InterpolationEditor {
         linearStyleToggle.querySelectorAll('.toggle-button').forEach(button => {
             button.addEventListener('click', () => {
                 this._setStyle({ linearStyle: button.dataset.linearStyle });
+            });
+        });
+
+        const arrowEndToggle = this.wrapper.querySelector('#arrow-end-toggle');
+        arrowEndToggle.querySelectorAll('.toggle-button').forEach(button => {
+            button.addEventListener('click', () => {
+                this._setStyle({ linearArrowEndMode: button.dataset.arrowEndMode });
             });
         });
 
@@ -526,7 +560,8 @@ export default class InterpolationEditor {
             order,
             preset,
             mode,
-            linearStyle
+            linearStyle,
+            linearArrowEndMode
         } = this.state.style;
         const base = {
             id,
@@ -534,7 +569,8 @@ export default class InterpolationEditor {
             order,
             preset,
             mode,
-            linearStyle
+            linearStyle,
+            linearArrowEndMode
         };
         if (type === 'spline') {
             return {
@@ -655,7 +691,7 @@ export default class InterpolationEditor {
     }
 
     _updateUIFromState() {
-        const { preset, mode, order, radiusMode, radiusValue, tension, type, linearStyle, nurbsDegree, pointHandling } = this.state.style;
+        const { preset, mode, order, radiusMode, radiusValue, tension, type, linearStyle, linearArrowEndMode, nurbsDegree, pointHandling } = this.state.style;
 
         this.previewCards.forEach((cardInfo, cardPreset) => {
             cardInfo.card.classList.toggle('is-active', cardPreset === preset);
@@ -668,18 +704,23 @@ export default class InterpolationEditor {
         this.wrapper.querySelectorAll('#linear-style-toggle .toggle-button').forEach(button => {
             button.classList.toggle('is-active', button.dataset.linearStyle === linearStyle);
         });
+        this.wrapper.querySelectorAll('#arrow-end-toggle .toggle-button').forEach(button => {
+            button.classList.toggle('is-active', button.dataset.arrowEndMode === linearArrowEndMode);
+        });
 
         this.wrapper.querySelectorAll('#point-handling-toggle .toggle-button').forEach(button => {
             button.classList.toggle('is-active', button.dataset.pointHandling === pointHandling);
         });
 
         const linearSection = this.wrapper.querySelector('#linear-section');
+        const arrowEndSection = this.wrapper.querySelector('#arrow-end-section');
         const handlingSection = this.wrapper.querySelector('#handling-section');
         const tensionSection = this.wrapper.querySelector('#tension-section');
         const radiusSection = this.wrapper.querySelector('#radius-section');
         const nurbsSection = this.wrapper.querySelector('#nurbs-section');
 
         linearSection.classList.toggle('is-hidden', type !== 'linear');
+        arrowEndSection.classList.toggle('is-hidden', !(type === 'linear' && linearStyle === 'arrows'));
         handlingSection.classList.toggle('is-hidden', true);
         tensionSection.classList.toggle('is-hidden', type !== 'spline');
         radiusSection.classList.toggle('is-hidden', type !== 'radius');
@@ -1072,7 +1113,14 @@ export default class InterpolationEditor {
             if (len < 1e-3) continue;
             const ux = dx / len;
             const uy = dy / len;
-            const tip = end;
+            const insetFactor = this.state.style.linearArrowEndMode === 'endpoint'
+                ? 0
+                : (this.state.style.linearArrowEndMode === '2radius' ? 2 : 1);
+            const inset = 3.5 * insetFactor;
+            const tip = {
+                x: end.x - ux * inset,
+                y: end.y - uy * inset
+            };
             const base = {
                 x: tip.x - ux * arrowLength,
                 y: tip.y - uy * arrowLength
@@ -1125,6 +1173,18 @@ export default class InterpolationEditor {
             return U.calculateCubicSpline(points, tension, closed, segments);
         }
         return U.calculateCubicSpline(points, tension, closed, segments);
+    }
+
+    _getArrowEndModeIconSvg(mode) {
+        const tipX = mode === 'endpoint' ? 22 : (mode === '2radius' ? 14 : 18);
+        const baseX = tipX - 6;
+        return `
+            <svg viewBox="0 0 26 16" width="26" height="16" class="arrow-end-mode-icon" aria-hidden="true">
+                <circle cx="22" cy="8" r="3" fill="none" stroke="#94a3b8" stroke-width="1" stroke-dasharray="2 2"></circle>
+                <line x1="3" y1="8" x2="${baseX}" y2="8" stroke="#e2e8f0" stroke-width="1.6" stroke-linecap="round"></line>
+                <path d="M ${tipX} 8 L ${baseX} 5 L ${baseX} 11 Z" fill="#e2e8f0"></path>
+            </svg>
+        `;
     }
 
     _buildControlCatmullTargets(points, closed) {
