@@ -1,5 +1,4 @@
 // interpolation-editor.js
-import * as U from './utils.js';
 import * as C from './constants.js';
 
 const DEFAULT_STYLE = {
@@ -973,9 +972,7 @@ export default class InterpolationEditor {
                 console.groupEnd();
             }
             if (isBranchingRadius) {
-                const segments = 6 + this.state.style.order * 4;
-                const controlMode = this.state.style.pointHandling === 'control';
-                drawPoints = U.calculateAffineCornerRadiusPath(points, path.closed, this.state.style.radiusMode, this.state.style.radiusValue, segments, false, false, controlMode, true);
+                drawPoints = this._sampleWithEngine(points, path.closed);
                 const allowStart = path.trueEndpointStart === true;
                 const allowEnd = path.trueEndpointEnd === true;
                 if (pathIndex === 0) {
