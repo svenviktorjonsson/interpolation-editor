@@ -1,5 +1,4 @@
 // interpolation-editor.js
-import * as U from './utils.js?v=dev';
 import * as C from './constants.js';
 
 const DEFAULT_STYLE = {
@@ -51,10 +50,13 @@ const TYPE_OPTIONS = [
     { id: 'radius', label: 'Radius' }
 ];
 
+const ENGINE_INTERPOLATION_ENABLED = true;
+
 export default class InterpolationEditor {
     constructor(options = {}) {
         this.container = options.container || document.body;
         this.onSelect = options.onSelect || (() => {});
+        this.engineWasmApi = options.engineWasmApi || null;
         this.state = {
             style: this._createStyle(),
             previewPoints: this._createDefaultPresetPoints()
@@ -65,12 +67,14 @@ export default class InterpolationEditor {
         this.previewCards = new Map();
         this.dragState = { presetId: null, pathIndex: null, pointIndex: null, vertexIndex: null, ioType: null, ioIndex: null };
         this.branching4Pairing = null;
+        this.engineInterpolation = null;
     }
 
     initialize() {
         if (this.wrapper) return;
         this._initializeDOM();
         this._setupEventListeners();
+        this._initEngineInterpolationBridge();
         this._updateUIFromState();
         this._renderAllPreviews();
     }
@@ -149,6 +153,16 @@ export default class InterpolationEditor {
                 inferredHandling = 'anchor';
             }
         }
+        let resolvedHandling = inferredHandling ?? style.pointHandling ?? base.pointHandling;
+        if (inferredType === 'linear') {
+            resolvedHandling = 'anchor';
+        } else if (inferredType === 'radius') {
+            resolvedHandling = resolvedHandling === 'mixed' ? 'mixed' : 'control';
+        } else if (inferredType === 'spline') {
+            if (!['anchor', 'control', 'mixed'].includes(resolvedHandling)) {
+                resolvedHandling = 'anchor';
+            }
+        }
         return {
             ...base,
             ...style,
@@ -163,9 +177,7 @@ export default class InterpolationEditor {
             linearStyle: style.linearStyle || base.linearStyle,
             linearArrowEndMode: style.linearArrowEndMode || base.linearArrowEndMode,
             nurbsDegree: style.nurbsDegree || base.nurbsDegree,
-            pointHandling: (inferredType === 'spline'
-                ? 'anchor'
-                : (inferredHandling ?? style.pointHandling ?? base.pointHandling))
+            pointHandling: resolvedHandling
         };
     }
 
@@ -561,7 +573,8 @@ export default class InterpolationEditor {
             preset,
             mode,
             linearStyle,
-            linearArrowEndMode
+            linearArrowEndMode,
+            nurbsDegree
         } = this.state.style;
         const base = {
             id,
@@ -573,11 +586,15 @@ export default class InterpolationEditor {
             linearArrowEndMode
         };
         if (type === 'spline') {
+            const usingNurbs = pointHandling === 'control' || pointHandling === 'mixed';
             return {
                 ...base,
-                type: 'cubic_spline',
+                type: usingNurbs ? 'nurbs' : 'cubic_spline',
                 cornerHandling: 'pass_through',
-                tension: Number(tension ?? 0.5)
+                tension: Number(tension ?? 0.5),
+                nurbsDegree: Math.max(2, Math.min(5, Math.round(Number(nurbsDegree ?? 3)))),
+                nurbsPointMode: pointHandling === 'mixed' ? 'mixed' : 'control_only',
+                nurbsMixedRule: pointHandling === 'mixed' ? 'convex_anchor_concave_control' : null
             };
         }
         if (type === 'radius') {
@@ -721,10 +738,10 @@ export default class InterpolationEditor {
 
         linearSection.classList.toggle('is-hidden', type !== 'linear');
         arrowEndSection.classList.toggle('is-hidden', !(type === 'linear' && linearStyle === 'arrows'));
-        handlingSection.classList.toggle('is-hidden', true);
-        tensionSection.classList.toggle('is-hidden', type !== 'spline');
+        handlingSection.classList.toggle('is-hidden', type !== 'spline');
+        tensionSection.classList.toggle('is-hidden', !(type === 'spline' && pointHandling === 'anchor'));
         radiusSection.classList.toggle('is-hidden', type !== 'radius');
-        nurbsSection.classList.toggle('is-hidden', true);
+        nurbsSection.classList.toggle('is-hidden', !(type === 'spline' && pointHandling !== 'anchor'));
 
         this.wrapper.querySelectorAll('#radius-mode-toggle .toggle-button').forEach(button => {
             button.classList.toggle('is-active', button.dataset.radiusMode === radiusMode);
@@ -1143,36 +1160,78 @@ export default class InterpolationEditor {
         ctx.restore();
     }
 
+    _initEngineInterpolationBridge() {
+        if (!ENGINE_INTERPOLATION_ENABLED) {
+            throw new Error('Engine interpolation is disabled. This editor requires wasm engine interpolation.');
+        }
+        const provided = this.engineWasmApi;
+        const globalBridge = globalThis && globalThis.vektorWasm;
+        const api = provided || globalBridge;
+        if (!api || typeof api.compute_interpolation !== 'function') {
+            throw new Error('Missing wasm engine bridge: expected compute_interpolation(payload) on options.engineWasmApi or globalThis.vektorWasm.');
+        }
+        this.engineInterpolation = (payload) => api.compute_interpolation(payload);
+    }
+
+    _styleToEnginePayload() {
+        const { type, tension, radiusMode, radiusValue, linearStyle, linearArrowEndMode, pointHandling, nurbsDegree } = this.state.style;
+        const useNurbs = type === 'spline' && (pointHandling === 'control' || pointHandling === 'mixed');
+        const mappedType = type === 'radius'
+            ? 'circular_arc'
+            : (type === 'linear' ? 'linear' : (useNurbs ? 'nurbs' : 'cubic_spline'));
+        const mappedMode = radiusMode === 'absolute'
+            ? 'absolute'
+            : (radiusMode === 'fixed' ? 'fixed' : 'relative');
+        return {
+            type: mappedType,
+            tension: Number(tension ?? 0.5),
+            radius_mode: mappedMode,
+            radius_value: Number(radiusValue ?? 0),
+            linear_style: linearStyle === 'arrows' ? 'arrows' : 'lines',
+            linear_arrow_end_mode: linearArrowEndMode === 'endpoint'
+                ? 'endpoint'
+                : (linearArrowEndMode === '2radius' ? 'two_radius' : 'radius'),
+            nurbs_degree: useNurbs ? Math.max(2, Math.min(5, Math.round(Number(nurbsDegree ?? 3)))) : undefined,
+            nurbs_point_mode: useNurbs ? (pointHandling === 'mixed' ? 'mixed' : 'control_only') : undefined,
+            nurbs_mixed_rule: useNurbs && pointHandling === 'mixed' ? 'convex_anchor_concave_control' : undefined
+        };
+    }
+
+    _sampleWithEngine(points, closed) {
+        if (!this.engineInterpolation) {
+            throw new Error('Wasm engine interpolation is not initialized.');
+        }
+        if (points.length < 2) return points;
+        const vertices = points.map((pt) => ({ x: pt.x, y: pt.y }));
+        const edges = [];
+        for (let i = 0; i < points.length - 1; i++) {
+            edges.push({ from: i, to: i + 1 });
+        }
+        if (closed) {
+            edges.push({ from: points.length - 1, to: 0 });
+        }
+        const payload = {
+            graph: { vertices, edges },
+            style: this._styleToEnginePayload(),
+            samples_per_segment: 16
+        };
+        const result = this.engineInterpolation(payload);
+        if (!result || typeof result === 'string') {
+            throw new Error(`Engine interpolation failed: ${typeof result === 'string' ? result : 'empty response'}`);
+        }
+        if (!Array.isArray(result.paths) || !result.paths.length) {
+            throw new Error('Engine interpolation returned no paths.');
+        }
+        const first = result.paths[0];
+        if (!first || !Array.isArray(first.points)) {
+            throw new Error('Engine interpolation response missing path points.');
+        }
+        return first.points.map((pt) => ({ x: pt.x, y: pt.y }));
+    }
+
     _getInterpolatedPoints(points, closed, referenceScale = 1) {
-        const { mode, order, type, pointHandling, nurbsDegree, radiusMode, radiusValue } = this.state.style;
-        if (mode === 'radius' || points.length < 2) {
-            if (mode === 'radius') {
-                const segments = 6 + order * 4;
-                const resolvedRadius = radiusMode === 'absolute'
-                    ? radiusValue
-                    : radiusValue;
-                if (resolvedRadius <= 1e-6) {
-                    return points;
-                }
-                const anchorMode = false;
-                const controlMode = pointHandling === 'control';
-                return U.calculateAffineCornerRadiusPath(points, closed, radiusMode, resolvedRadius, segments, false, anchorMode, controlMode);
-            }
-            return points;
-        }
-        const segments = 4 + order * 4;
-        if (type === 'linear' || order === 1) {
-            return U.calculateLinearSpline(points, closed, segments);
-        }
-        if (points.length < 3) {
-            return points;
-        }
-        const degree = nurbsDegree;
-        const tension = this.state.style.tension ?? 0.5;
-        if (type === 'spline') {
-            return U.calculateCubicSpline(points, tension, closed, segments);
-        }
-        return U.calculateCubicSpline(points, tension, closed, segments);
+        const _ = referenceScale;
+        return this._sampleWithEngine(points, closed);
     }
 
     _getArrowEndModeIconSvg(mode) {
