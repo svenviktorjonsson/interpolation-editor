@@ -1,4 +1,5 @@
 // interpolation-editor.js
+import * as U from './utils.js';
 import * as C from './constants.js';
 
 const DEFAULT_STYLE = {
