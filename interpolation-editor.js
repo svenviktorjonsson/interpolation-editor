@@ -408,7 +408,7 @@ export default class InterpolationEditor {
         arrowEndSection.append(arrowEndRow);
 
         const handlingSection = createEl('div', { className: 'param-section', id: 'handling-section' });
-        handlingSection.append(createEl('div', { className: 'section-caption', text: 'Point handling.' }));
+        handlingSection.append(createEl('div', { className: 'section-caption', text: 'Point handling (Anchor = Catmull-Rom, Control/Mixed = NURBS).' }));
         const handlingRow = createEl('div', { className: 'param-row' });
         const handlingToggle = createEl('div', { className: 'toggle-group', id: 'point-handling-toggle' });
         handlingToggle.append(
@@ -1112,12 +1112,17 @@ export default class InterpolationEditor {
 
     _drawEdgeArrows(ctx, points, closed) {
         if (points.length < 2) return;
-        const arrowLength = 10;
-        const arrowWidth = 6;
+        const arrowStrokeWidth = 2;
+        const arrowCapWidth = 8;
+        const arrowCapHeight = 8;
         const count = points.length;
         const last = closed ? count : count - 1;
 
         ctx.save();
+        ctx.strokeStyle = ctx.fillStyle = ctx.strokeStyle;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = arrowStrokeWidth;
         ctx.fillStyle = ctx.strokeStyle;
         for (let i = 0; i < last; i++) {
             const start = points[i];
@@ -1137,16 +1142,21 @@ export default class InterpolationEditor {
                 y: end.y - uy * inset
             };
             const base = {
-                x: tip.x - ux * arrowLength,
-                y: tip.y - uy * arrowLength
+                x: tip.x - ux * arrowCapHeight,
+                y: tip.y - uy * arrowCapHeight
             };
+            // Draw only to arrow cap base so the stroke does not run under the arrowhead.
+            ctx.beginPath();
+            ctx.moveTo(start.x, start.y);
+            ctx.lineTo(base.x, base.y);
+            ctx.stroke();
             const left = {
-                x: base.x + -uy * (arrowWidth / 2),
-                y: base.y + ux * (arrowWidth / 2)
+                x: base.x + -uy * (arrowCapWidth / 2),
+                y: base.y + ux * (arrowCapWidth / 2)
             };
             const right = {
-                x: base.x + uy * (arrowWidth / 2),
-                y: base.y - ux * (arrowWidth / 2)
+                x: base.x + uy * (arrowCapWidth / 2),
+                y: base.y - ux * (arrowCapWidth / 2)
             };
             ctx.beginPath();
             ctx.moveTo(tip.x, tip.y);
