@@ -14,12 +14,26 @@ const DEFAULT_STYLE = {
     absRadiusValue: 0.5,
     linearStyle: 'lines',
     linearArrowEndMode: 'radius',
+    linearArrowMode: 'absolute',
+    linearArrowRelativeMode: 'end',
+    linearArrowRelativeValue: 0,
+    linearArrowAbsoluteMode: 'dist',
+    linearArrowAbsoluteValue: 1,
     nurbsDegree: 3,
-    pointHandling: 'anchor'
+    pointHandling: 'anchor',
+    smoothingAmount: 0.5,
+    smoothingQuality: 1,
+    nurbsMixedSide: 'left',
+    fractalPointCount: 2,
+    fractalControlPoints: [
+        { u: 0.33, v: 1 / 3 },
+        { u: 0.66, v: -(1 / 3) }
+    ]
 };
 
 const MAX_ABS_RADIUS = 500;
 const clamp01 = (value) => Math.max(0, Math.min(1, value));
+const clampRange = (value, min, max) => Math.max(min, Math.min(max, value));
 const clampAbsRadius = (value) => Math.max(0, Math.min(MAX_ABS_RADIUS, value));
 const absSliderToRadius = (sliderValue) => {
     const clamped = clamp01(Number(sliderValue) || 0);
@@ -47,10 +61,15 @@ const ORDER_OPTIONS = [
 const TYPE_OPTIONS = [
     { id: 'linear', label: 'Linear' },
     { id: 'spline', label: 'Spline' },
-    { id: 'radius', label: 'Radius' }
+    { id: 'radius', label: 'Radius' },
+    { id: 'smoothing', label: 'Smoothing' },
+    { id: 'fractal', label: 'Fractal' }
 ];
 
 const ENGINE_INTERPOLATION_ENABLED = true;
+const PREVIEW_SAMPLES_PER_SEGMENT = 80;
+const FRACTAL_MIN_SEGMENT_PX = 5;
+const FRACTAL_V_LIMIT = 1 / 3;
 
 export default class InterpolationEditor {
     constructor(options = {}) {
@@ -68,6 +87,14 @@ export default class InterpolationEditor {
         this.dragState = { presetId: null, pathIndex: null, pointIndex: null, vertexIndex: null, ioType: null, ioIndex: null };
         this.branching4Pairing = null;
         this.engineInterpolation = null;
+        this.fractalDragIndex = null;
+        this.fractalSnapFractions = [];
+        this.fractalUSnapGrid = this._buildFractalUSnapGrid();
+        this.fractalVSnapGrid = this._buildFractalVSnapGrid();
+        this._renderThrottleMs = 33;
+        this._renderThrottleTimer = null;
+        this._pendingRenderAll = false;
+        this._pendingRenderPresets = new Set();
     }
 
     initialize() {
@@ -95,8 +122,13 @@ export default class InterpolationEditor {
     }
 
     _createStyle() {
+        const fractalControlPoints = (DEFAULT_STYLE.fractalControlPoints || []).map((pt) => ({
+            u: pt.u,
+            v: pt.v
+        }));
         return {
             ...DEFAULT_STYLE,
+            fractalControlPoints,
             id: `style_${Date.now()}`
         };
     }
@@ -104,16 +136,30 @@ export default class InterpolationEditor {
     _normalizeStyle(style) {
         const base = this._createStyle();
         if (!style) return base;
+        const incomingNurbsPointMode = style.nurbsPointMode ?? style.nurbs_point_mode;
+        const incomingNurbsMixedRule = style.nurbsMixedRule ?? style.nurbs_mixed_rule;
+        const incomingNurbsSide = style.nurbsMixedSide ?? style.nurbsSide ?? style.nurbs_side;
         const requestedOrder = Number(style.order);
         const order = requestedOrder === 3 ? 3 : 1;
         let inferredType = style.type === 'px_radius' ? 'abs_radius' : style.type;
         let normalizedRadiusMode = style.radiusMode === 'fixed' ? 'absolute' : style.radiusMode;
         let inferredHandling = style.pointHandling;
+        let inferredNurbsMixedSide = incomingNurbsSide || base.nurbsMixedSide;
+        if (incomingNurbsMixedRule === 'convex_control_concave_anchor') {
+            inferredNurbsMixedSide = 'right';
+        } else if (incomingNurbsMixedRule === 'convex_anchor_concave_control') {
+            inferredNurbsMixedSide = 'left';
+        }
         if (inferredType === 'cubic_spline') {
             inferredType = 'spline';
             inferredHandling = 'anchor';
         } else if (inferredType === 'circular_arc') {
             inferredType = 'radius';
+        } else if (inferredType === 'smoothing') {
+            inferredType = 'smoothing';
+            inferredHandling = inferredHandling || 'control';
+        } else if (inferredType === 'fractal') {
+            inferredType = 'fractal';
         } else if (inferredType === 'linear') {
             inferredType = 'linear';
         }
@@ -122,7 +168,7 @@ export default class InterpolationEditor {
             inferredHandling = 'anchor';
         } else if (inferredType === 'nurbs') {
             inferredType = 'spline';
-            inferredHandling = 'control';
+            inferredHandling = incomingNurbsPointMode === 'mixed' ? 'mixed' : 'control';
         } else if (inferredType === 'linear') {
             inferredType = 'spline';
             inferredHandling = 'anchor';
@@ -140,6 +186,37 @@ export default class InterpolationEditor {
         const radiusValue = normalizedRadiusMode === 'relative'
             ? relRadiusValue
             : absSliderToRadius(absRadiusValue);
+        const hasExplicitArrowControls = style.linearArrowMode !== undefined
+            || style.linearArrowRelativeMode !== undefined
+            || style.linearArrowRelativeValue !== undefined
+            || style.linearArrowAbsoluteMode !== undefined
+            || style.linearArrowAbsoluteValue !== undefined;
+        let linearArrowMode = style.linearArrowMode === 'absolute' ? 'absolute' : 'relative';
+        let linearArrowRelativeMode = style.linearArrowRelativeMode === 'over' ? 'over' : 'end';
+        let linearArrowRelativeValue = clamp01(Number(style.linearArrowRelativeValue ?? base.linearArrowRelativeValue));
+        let linearArrowAbsoluteMode = style.linearArrowAbsoluteMode === 'length' ? 'length' : 'dist';
+        let linearArrowAbsoluteValueRaw = Number(style.linearArrowAbsoluteValue ?? base.linearArrowAbsoluteValue);
+        if (!Number.isFinite(linearArrowAbsoluteValueRaw)) {
+            linearArrowAbsoluteValueRaw = base.linearArrowAbsoluteValue;
+        }
+        let linearArrowAbsoluteValue = linearArrowAbsoluteMode === 'length'
+            ? clampRange(linearArrowAbsoluteValueRaw, 1, 5)
+            : clampRange(linearArrowAbsoluteValueRaw, 0, 4);
+        if (!hasExplicitArrowControls) {
+            if (style.linearArrowEndMode === 'endpoint') {
+                linearArrowMode = 'relative';
+                linearArrowRelativeMode = 'end';
+                linearArrowRelativeValue = 0;
+            } else if (style.linearArrowEndMode === '2radius') {
+                linearArrowMode = 'absolute';
+                linearArrowAbsoluteMode = 'dist';
+                linearArrowAbsoluteValue = 2;
+            } else if (style.linearArrowEndMode === 'radius') {
+                linearArrowMode = 'absolute';
+                linearArrowAbsoluteMode = 'dist';
+                linearArrowAbsoluteValue = 1;
+            }
+        }
         if (!inferredType) {
             if (style.mode === 'radius') {
                 inferredType = 'radius';
@@ -158,11 +235,22 @@ export default class InterpolationEditor {
             resolvedHandling = 'anchor';
         } else if (inferredType === 'radius') {
             resolvedHandling = resolvedHandling === 'mixed' ? 'mixed' : 'control';
+        } else if (inferredType === 'smoothing') {
+            if (!['anchor', 'control', 'mixed'].includes(resolvedHandling)) {
+                resolvedHandling = 'control';
+            }
         } else if (inferredType === 'spline') {
             if (!['anchor', 'control', 'mixed'].includes(resolvedHandling)) {
                 resolvedHandling = 'anchor';
             }
         }
+        const fractalPointCount = Math.max(1, Math.min(3, Math.round(Number(style.fractalPointCount ?? base.fractalPointCount))));
+        const smoothingAmount = clamp01(Number(style.smoothingAmount ?? base.smoothingAmount));
+        const smoothingQuality = Math.max(1, Math.min(5, Math.round(Number(style.smoothingQuality ?? base.smoothingQuality))));
+        const fractalControlPoints = this._normalizeFractalControlPoints(
+            style.fractalControlPoints ?? base.fractalControlPoints,
+            fractalPointCount
+        );
         return {
             ...base,
             ...style,
@@ -176,9 +264,131 @@ export default class InterpolationEditor {
             absRadiusValue,
             linearStyle: style.linearStyle || base.linearStyle,
             linearArrowEndMode: style.linearArrowEndMode || base.linearArrowEndMode,
+            linearArrowMode,
+            linearArrowRelativeMode,
+            linearArrowRelativeValue,
+            linearArrowAbsoluteMode,
+            linearArrowAbsoluteValue,
             nurbsDegree: style.nurbsDegree || base.nurbsDegree,
-            pointHandling: resolvedHandling
+            pointHandling: resolvedHandling,
+            smoothingAmount,
+            smoothingQuality,
+            nurbsMixedSide: inferredNurbsMixedSide === 'right' ? 'right' : 'left',
+            fractalPointCount,
+            fractalControlPoints
         };
+    }
+
+    _defaultFractalControlPoints(count) {
+        if (count === 1) return [{ u: 0.5, v: FRACTAL_V_LIMIT }];
+        if (count === 3) {
+            return [
+                { u: 0.25, v: FRACTAL_V_LIMIT },
+                { u: 0.5, v: -FRACTAL_V_LIMIT },
+                { u: 0.75, v: FRACTAL_V_LIMIT }
+            ];
+        }
+        return [
+            { u: 0.33, v: FRACTAL_V_LIMIT },
+            { u: 0.66, v: -FRACTAL_V_LIMIT }
+        ];
+    }
+
+    _normalizeFractalControlPoints(points, count) {
+        const defaults = this._defaultFractalControlPoints(count);
+        const src = Array.isArray(points) ? points : defaults;
+        const out = src.slice(0, count).map((pt, idx) => ({
+            u: Math.max(0.05, Math.min(0.95, Number(pt?.u ?? defaults[idx]?.u ?? ((idx + 1) / (count + 1))))),
+            v: Math.max(-FRACTAL_V_LIMIT, Math.min(FRACTAL_V_LIMIT, Number(pt?.v ?? defaults[idx]?.v ?? 0)))
+        }));
+        while (out.length < count) {
+            const idx = out.length;
+            out.push({
+                u: defaults[idx]?.u ?? ((idx + 1) / (count + 1)),
+                v: defaults[idx]?.v ?? 0
+            });
+        }
+        return out;
+    }
+
+    _gcd(a, b) {
+        let x = Math.abs(a);
+        let y = Math.abs(b);
+        while (y !== 0) {
+            const t = x % y;
+            x = y;
+            y = t;
+        }
+        return x || 1;
+    }
+
+    _buildFractalUSnapGrid() {
+        const unique = new Map();
+        for (let m = 1; m <= 8; m++) {
+            for (let n = 1; n <= 8; n++) {
+                if (n >= m) continue;
+                const g = this._gcd(n, m);
+                const num = n / g;
+                const den = m / g;
+                const key = `${num}/${den}`;
+                if (!unique.has(key)) {
+                    unique.set(key, {
+                        u: num / den,
+                        num,
+                        den
+                    });
+                }
+            }
+        }
+        return Array.from(unique.values()).sort((a, b) => a.u - b.u);
+    }
+
+    _snapFractalU(rawU, minU = 0.05, maxU = 0.95) {
+        const candidates = this.fractalUSnapGrid.filter((c) => c.u >= minU - 1e-9 && c.u <= maxU + 1e-9);
+        let best = candidates[0] || { u: Math.max(minU, Math.min(maxU, rawU)), num: 0, den: 1 };
+        let bestDist = Math.abs(rawU - best.u);
+        for (let i = 1; i < candidates.length; i++) {
+            const candidate = candidates[i];
+            const dist = Math.abs(rawU - candidate.u);
+            if (dist < bestDist) {
+                best = candidate;
+                bestDist = dist;
+            }
+        }
+        return best;
+    }
+
+    _buildFractalVSnapGrid() {
+        const unique = new Map();
+        unique.set('0/1', { v: 0, num: 0, den: 1 });
+        for (let den = 1; den <= 8; den++) {
+            for (let num = -8; num <= 8; num++) {
+                const value = num / den;
+                if (Math.abs(value) > FRACTAL_V_LIMIT + 1e-12) continue;
+                const g = this._gcd(num, den);
+                const rNum = num / g;
+                const rDen = den / g;
+                const key = `${rNum}/${rDen}`;
+                if (!unique.has(key)) {
+                    unique.set(key, { v: rNum / rDen, num: rNum, den: rDen });
+                }
+            }
+        }
+        return Array.from(unique.values()).sort((a, b) => a.v - b.v);
+    }
+
+    _snapFractalV(rawV) {
+        let best = this.fractalVSnapGrid[0] || { v: rawV, num: 0, den: 1 };
+        let bestDist = Math.abs(rawV - best.v);
+        for (let i = 1; i < this.fractalVSnapGrid.length; i++) {
+            const candidate = this.fractalVSnapGrid[i];
+            const dist = Math.abs(rawV - candidate.v);
+            if (dist < bestDist) {
+                best = candidate;
+                bestDist = dist;
+            }
+        }
+        return best;
     }
 
     _createDefaultPresetPoints() {
@@ -383,32 +593,40 @@ export default class InterpolationEditor {
         linearSection.append(linearRow);
 
         const arrowEndSection = createEl('div', { className: 'param-section', id: 'arrow-end-section' });
-        arrowEndSection.append(createEl('div', { className: 'section-caption', text: 'Arrow endpoint mode.' }));
-        const arrowEndRow = createEl('div', { className: 'param-row' });
-        const arrowEndToggle = createEl('div', { className: 'toggle-group icon-toggle-group', id: 'arrow-end-toggle' });
-        const endModes = [
-            { id: 'endpoint', title: 'Arrow tip at endpoint' },
-            { id: 'radius', title: 'Arrow tip one radius before endpoint' },
-            { id: '2radius', title: 'Arrow tip two radii before endpoint' }
-        ];
-        endModes.forEach((mode) => {
-            const button = createEl('button', {
-                className: 'toggle-button icon-toggle-button',
-                attrs: {
-                    'data-arrow-end-mode': mode.id,
-                    type: 'button',
-                    title: mode.title,
-                    'aria-label': mode.title
-                }
-            });
-            button.innerHTML = this._getArrowEndModeIconSvg(mode.id);
-            arrowEndToggle.append(button);
-        });
-        arrowEndRow.append(arrowEndToggle);
-        arrowEndSection.append(arrowEndRow);
+        arrowEndSection.append(createEl('div', { className: 'section-caption', text: 'Arrow placement.' }));
+        const arrowSwitchesRow = createEl('div', { className: 'param-row', id: 'arrow-switches-row' });
+        const arrowModeToggle = createEl('div', { className: 'toggle-group', id: 'arrow-mode-toggle' });
+        arrowModeToggle.append(
+            createEl('button', { className: 'toggle-button', text: 'Relative', attrs: { 'data-arrow-mode': 'relative', type: 'button' } }),
+            createEl('button', { className: 'toggle-button', text: 'Absolute', attrs: { 'data-arrow-mode': 'absolute', type: 'button' } })
+        );
+        arrowSwitchesRow.append(arrowModeToggle);
+        const arrowRelativeRow = createEl('div', { id: 'arrow-relative-row' });
+        const arrowRelativeToggle = createEl('div', { className: 'toggle-group', id: 'arrow-relative-toggle' });
+        arrowRelativeToggle.append(
+            createEl('button', { className: 'toggle-button', text: 'Over', attrs: { 'data-arrow-relative-mode': 'over', type: 'button' } }),
+            createEl('button', { className: 'toggle-button', text: 'End', attrs: { 'data-arrow-relative-mode': 'end', type: 'button' } })
+        );
+        arrowRelativeRow.append(arrowRelativeToggle);
+        arrowSwitchesRow.append(arrowRelativeRow);
+        const arrowAbsoluteRow = createEl('div', { id: 'arrow-absolute-row' });
+        const arrowAbsoluteToggle = createEl('div', { className: 'toggle-group', id: 'arrow-absolute-toggle' });
+        arrowAbsoluteToggle.append(
+            createEl('button', { className: 'toggle-button', text: 'Length', attrs: { 'data-arrow-absolute-mode': 'length', type: 'button' } }),
+            createEl('button', { className: 'toggle-button', text: 'Dist', attrs: { 'data-arrow-absolute-mode': 'dist', type: 'button' } })
+        );
+        arrowAbsoluteRow.append(arrowAbsoluteToggle);
+        arrowSwitchesRow.append(arrowAbsoluteRow);
+        arrowEndSection.append(arrowSwitchesRow);
+        const arrowValueRow = createEl('div', { className: 'param-row', id: 'arrow-value-row' });
+        this.elements.arrowValueSlider = createEl('input', { id: 'arrow-value-slider', type: 'range', attrs: { min: '0', max: '1', step: '0.01' } });
+        this.elements.arrowValueUnit = createEl('span', { id: 'arrow-value-unit', text: 'r' });
+        this.elements.arrowValueInput = createEl('input', { id: 'arrow-value-input', type: 'number', attrs: { min: '0', max: '1', step: '0.01' } });
+        arrowValueRow.append(this.elements.arrowValueSlider, this.elements.arrowValueUnit, this.elements.arrowValueInput);
+        arrowEndSection.append(arrowValueRow);
 
         const handlingSection = createEl('div', { className: 'param-section', id: 'handling-section' });
-        handlingSection.append(createEl('div', { className: 'section-caption', text: 'Point handling (Anchor = Catmull-Rom, Control/Mixed = NURBS).' }));
+        handlingSection.append(createEl('div', { className: 'section-caption', text: 'Point handling mode.' }));
         const handlingRow = createEl('div', { className: 'param-row' });
         const handlingToggle = createEl('div', { className: 'toggle-group', id: 'point-handling-toggle' });
         handlingToggle.append(
@@ -433,6 +651,23 @@ export default class InterpolationEditor {
         );
         radiusSection.append(radiusModeToggle);
 
+        const smoothingSection = createEl('div', { className: 'param-section', id: 'smoothing-section' });
+        smoothingSection.append(createEl('div', { className: 'section-caption', text: 'Smoothing amount (0 = none, 1 = 1/3 on each side).' }));
+        const smoothingRow = createEl('div', { className: 'param-row' });
+        this.elements.smoothingSlider = createEl('input', { id: 'smoothing-slider', type: 'range', attrs: { min: '0', max: '1', step: '0.01' } });
+        this.elements.smoothingInput = createEl('input', { id: 'smoothing-input', type: 'number', attrs: { min: '0', max: '1', step: '0.01' } });
+        smoothingRow.append(this.elements.smoothingSlider, this.elements.smoothingInput);
+        smoothingSection.append(smoothingRow);
+        const smoothingQualityRow = createEl('div', { className: 'param-row' });
+        const smoothingQualityToggle = createEl('div', { className: 'toggle-group', id: 'smoothing-quality-toggle' });
+        smoothingQualityToggle.append(
+            createEl('button', { className: 'toggle-button', text: 'Fast', attrs: { 'data-smoothing-quality': '1', type: 'button' } }),
+            createEl('button', { className: 'toggle-button', text: 'Balanced', attrs: { 'data-smoothing-quality': '2', type: 'button' } }),
+            createEl('button', { className: 'toggle-button', text: 'Full', attrs: { 'data-smoothing-quality': '5', type: 'button' } })
+        );
+        smoothingQualityRow.append(smoothingQualityToggle);
+        smoothingSection.append(smoothingQualityRow);
+
         const nurbsSection = createEl('div', { className: 'param-section', id: 'nurbs-section' });
         nurbsSection.append(createEl('div', { className: 'section-caption', text: 'NURBS degree.' }));
         const nurbsRow = createEl('div', { className: 'param-row' });
@@ -440,8 +675,52 @@ export default class InterpolationEditor {
         this.elements.nurbsDegreeInput = createEl('input', { id: 'nurbs-degree-input', type: 'number', attrs: { min: '2', max: '5', step: '1' } });
         nurbsRow.append(this.elements.nurbsDegreeSlider, this.elements.nurbsDegreeInput);
         nurbsSection.append(nurbsRow);
+        const nurbsSideSection = createEl('div', { className: 'param-section', id: 'nurbs-side-section' });
+        nurbsSideSection.append(createEl('div', { className: 'section-caption', text: 'Mixed side (along point index direction).' }));
+        const nurbsSideRow = createEl('div', { className: 'param-row' });
+        const nurbsSideToggle = createEl('div', { className: 'toggle-group', id: 'nurbs-side-toggle' });
+        nurbsSideToggle.append(
+            createEl('button', { className: 'toggle-button', text: 'Left', attrs: { 'data-nurbs-mixed-side': 'left', type: 'button' } }),
+            createEl('button', { className: 'toggle-button', text: 'Right', attrs: { 'data-nurbs-mixed-side': 'right', type: 'button' } })
+        );
+        nurbsSideRow.append(nurbsSideToggle);
+        nurbsSideSection.append(nurbsSideRow);
+        nurbsSection.append(nurbsSideSection);
 
-        paramsPanel.append(linearSection, arrowEndSection, handlingSection, tensionSection, radiusSection, nurbsSection);
+        const fractalSection = createEl('div', { className: 'param-section', id: 'fractal-section' });
+        fractalSection.append(createEl('div', { className: 'section-caption', text: 'Fractal generator (drag interior points).' }));
+        const fractalCountRow = createEl('div', { className: 'param-row' });
+        const fractalCountToggle = createEl('div', { className: 'toggle-group', id: 'fractal-count-toggle' });
+        fractalCountToggle.append(
+            createEl('button', { className: 'toggle-button', text: '1', attrs: { 'data-fractal-count': '1', type: 'button' } }),
+            createEl('button', { className: 'toggle-button', text: '2', attrs: { 'data-fractal-count': '2', type: 'button' } }),
+            createEl('button', { className: 'toggle-button', text: '3', attrs: { 'data-fractal-count': '3', type: 'button' } })
+        );
+        fractalCountRow.append(fractalCountToggle);
+        fractalSection.append(fractalCountRow);
+        const fractalCanvasRow = createEl('div', { className: 'param-row' });
+        const fractalCanvasWrap = createEl('div', { id: 'fractal-canvas-wrap' });
+        fractalCanvasWrap.style.position = 'relative';
+        fractalCanvasWrap.style.width = '100%';
+        fractalCanvasWrap.style.overflow = 'visible';
+        this.elements.fractalCanvas = createEl('canvas', { id: 'fractal-canvas', attrs: { width: '240', height: '72' } });
+        this.elements.fractalCanvas.style.width = '100%';
+        this.elements.fractalCanvas.style.height = '72px';
+        this.elements.fractalCanvas.style.border = '1px solid rgba(148, 163, 184, 0.35)';
+        this.elements.fractalCanvas.style.borderRadius = '4px';
+        this.elements.fractalSnapLabels = createEl('div', { id: 'fractal-snap-labels' });
+        this.elements.fractalSnapLabels.style.position = 'absolute';
+        this.elements.fractalSnapLabels.style.left = '0';
+        this.elements.fractalSnapLabels.style.top = '0';
+        this.elements.fractalSnapLabels.style.width = '100%';
+        this.elements.fractalSnapLabels.style.height = '100%';
+        this.elements.fractalSnapLabels.style.pointerEvents = 'none';
+        this.elements.fractalSnapLabels.style.overflow = 'visible';
+        fractalCanvasWrap.append(this.elements.fractalCanvas, this.elements.fractalSnapLabels);
+        fractalCanvasRow.append(fractalCanvasWrap);
+        fractalSection.append(fractalCanvasRow);
+
+        paramsPanel.append(linearSection, arrowEndSection, handlingSection, tensionSection, radiusSection, smoothingSection, nurbsSection, fractalSection);
 
         const actionsPanel = createEl('div', { className: 'editor-panel actions-panel' });
         actionsPanel.append(createEl('div', { className: 'panel-header', text: 'Actions' }));
@@ -486,11 +765,29 @@ export default class InterpolationEditor {
             });
         });
 
-        const arrowEndToggle = this.wrapper.querySelector('#arrow-end-toggle');
-        arrowEndToggle.querySelectorAll('.toggle-button').forEach(button => {
+        const arrowModeToggle = this.wrapper.querySelector('#arrow-mode-toggle');
+        arrowModeToggle.querySelectorAll('.toggle-button').forEach(button => {
             button.addEventListener('click', () => {
-                this._setStyle({ linearArrowEndMode: button.dataset.arrowEndMode });
+                this._applyArrowMode(button.dataset.arrowMode);
             });
+        });
+        const arrowRelativeToggle = this.wrapper.querySelector('#arrow-relative-toggle');
+        arrowRelativeToggle.querySelectorAll('.toggle-button').forEach(button => {
+            button.addEventListener('click', () => {
+                this._applyArrowRelativeMode(button.dataset.arrowRelativeMode);
+            });
+        });
+        const arrowAbsoluteToggle = this.wrapper.querySelector('#arrow-absolute-toggle');
+        arrowAbsoluteToggle.querySelectorAll('.toggle-button').forEach(button => {
+            button.addEventListener('click', () => {
+                this._applyArrowAbsoluteMode(button.dataset.arrowAbsoluteMode);
+            });
+        });
+        this.elements.arrowValueSlider.addEventListener('input', (event) => {
+            this._applyArrowValue(Number(event.target.value), true);
+        });
+        this.elements.arrowValueInput.addEventListener('change', (event) => {
+            this._applyArrowValue(Number(event.target.value), false);
         });
 
         const handlingToggle = this.wrapper.querySelector('#point-handling-toggle');
@@ -526,6 +823,20 @@ export default class InterpolationEditor {
             const value = Number(event.target.value);
             this._applyTensionValue(value, false);
         });
+        this.elements.smoothingSlider.addEventListener('input', (event) => {
+            const value = Number(event.target.value);
+            this._applySmoothingAmount(value, true);
+        });
+        this.elements.smoothingInput.addEventListener('change', (event) => {
+            const value = Number(event.target.value);
+            this._applySmoothingAmount(value, false);
+        });
+        const smoothingQualityToggle = this.wrapper.querySelector('#smoothing-quality-toggle');
+        smoothingQualityToggle.querySelectorAll('.toggle-button').forEach(button => {
+            button.addEventListener('click', () => {
+                this._applySmoothingQuality(Number(button.dataset.smoothingQuality));
+            });
+        });
 
         this.elements.nurbsDegreeSlider.addEventListener('input', (event) => {
             const value = Number(event.target.value);
@@ -535,6 +846,26 @@ export default class InterpolationEditor {
         this.elements.nurbsDegreeInput.addEventListener('change', (event) => {
             const value = Number(event.target.value);
             this._applyNurbsDegreeValue(value, false);
+        });
+        const nurbsSideToggle = this.wrapper.querySelector('#nurbs-side-toggle');
+        nurbsSideToggle.querySelectorAll('.toggle-button').forEach(button => {
+            button.addEventListener('click', () => {
+                this._setStyle({ nurbsMixedSide: button.dataset.nurbsMixedSide });
+            });
+        });
+        const fractalCountToggle = this.wrapper.querySelector('#fractal-count-toggle');
+        fractalCountToggle.querySelectorAll('.toggle-button').forEach(button => {
+            button.addEventListener('click', () => {
+                this._applyFractalPointCount(Number(button.dataset.fractalCount));
+            });
+        });
+        this.elements.fractalCanvas.addEventListener('mousedown', (event) => {
+            const idx = this._findFractalControlHit(event);
+            if (idx !== null) {
+                this.fractalDragIndex = idx;
+                this.fractalSnapFractions = new Array(this.state.style.fractalPointCount).fill(null);
+                event.preventDefault();
+            }
         });
 
         this.elements.closeButton.addEventListener('click', () => {
@@ -548,9 +879,27 @@ export default class InterpolationEditor {
 
         window.addEventListener('mousemove', (event) => {
             this._handlePreviewMouseMove(event);
+            if (this.fractalDragIndex !== null) {
+                const controls = this.state.style.fractalControlPoints.map((pt) => ({ ...pt }));
+                const next = this._fractalControlFromMouse(event, this.fractalDragIndex, controls);
+                if (next) {
+                    controls[this.fractalDragIndex] = next;
+                    this.state.style = {
+                        ...this.state.style,
+                        fractalControlPoints: this._normalizeFractalControlPoints(
+                            controls,
+                            this.state.style.fractalPointCount
+                        )
+                    };
+                    this._updateUIFromState();
+                    this._requestPreviewRender();
+                }
+            }
         });
         window.addEventListener('mouseup', () => {
             this._handlePreviewMouseUp();
+            this.fractalDragIndex = null;
+            this._flushPendingPreviewRender();
         });
     }
 
@@ -574,8 +923,17 @@ export default class InterpolationEditor {
             mode,
             linearStyle,
             linearArrowEndMode,
-            nurbsDegree
+            linearArrowMode,
+            linearArrowRelativeMode,
+            linearArrowRelativeValue,
+            linearArrowAbsoluteMode,
+            linearArrowAbsoluteValue,
+            nurbsDegree,
+            nurbsMixedSide,
+            smoothingAmount,
+            smoothingQuality
         } = this.state.style;
+        const linearArrowLegacyEndMode = this._legacyArrowEndModeFromStyle(this.state.style);
         const base = {
             id,
             name,
@@ -583,7 +941,12 @@ export default class InterpolationEditor {
             preset,
             mode,
             linearStyle,
-            linearArrowEndMode
+            linearArrowEndMode: linearArrowLegacyEndMode,
+            linearArrowMode,
+            linearArrowRelativeMode,
+            linearArrowRelativeValue,
+            linearArrowAbsoluteMode,
+            linearArrowAbsoluteValue
         };
         if (type === 'spline') {
             const usingNurbs = pointHandling === 'control' || pointHandling === 'mixed';
@@ -594,7 +957,27 @@ export default class InterpolationEditor {
                 tension: Number(tension ?? 0.5),
                 nurbsDegree: Math.max(2, Math.min(5, Math.round(Number(nurbsDegree ?? 3)))),
                 nurbsPointMode: pointHandling === 'mixed' ? 'mixed' : 'control_only',
-                nurbsMixedRule: pointHandling === 'mixed' ? 'convex_anchor_concave_control' : null
+                nurbsMixedRule: pointHandling === 'mixed' ? 'convex_anchor_concave_control' : null,
+                nurbsSide: pointHandling === 'mixed' ? (nurbsMixedSide === 'right' ? 'right' : 'left') : null,
+                nurbsMixedSide: pointHandling === 'mixed' ? (nurbsMixedSide === 'right' ? 'right' : 'left') : null
+            };
+        }
+        if (type === 'fractal') {
+            return {
+                ...base,
+                type: 'fractal',
+                fractalPointCount: this.state.style.fractalPointCount,
+                fractalControlPoints: this.state.style.fractalControlPoints.map((pt) => ({ u: pt.u, v: pt.v }))
+            };
+        }
+        if (type === 'smoothing') {
+            return {
+                ...base,
+                type: 'smoothing',
+                pointHandling,
+                mixedSide: nurbsMixedSide === 'right' ? 'right' : 'left',
+                smoothingAmount: clamp01(Number(smoothingAmount ?? 0.5)),
+                smoothingQuality: Math.max(1, Math.min(5, Math.round(Number(smoothingQuality ?? 1))))
             };
         }
         if (type === 'radius') {
@@ -651,6 +1034,83 @@ export default class InterpolationEditor {
         this._renderAllPreviews();
     }
 
+    _applySmoothingAmount(value, fromSlider) {
+        if (Number.isNaN(value)) return;
+        const nextStyle = { ...this.state.style };
+        nextStyle.smoothingAmount = clamp01(value);
+        this.state.style = nextStyle;
+        if (fromSlider) {
+            this.elements.smoothingInput.value = nextStyle.smoothingAmount.toFixed(2);
+        } else {
+            this.elements.smoothingSlider.value = nextStyle.smoothingAmount;
+        }
+        this._updateUIFromState();
+        this._renderAllPreviews();
+    }
+
+    _applySmoothingQuality(value) {
+        const nextStyle = { ...this.state.style };
+        nextStyle.smoothingQuality = Math.max(1, Math.min(5, Math.round(Number(value) || 1)));
+        this.state.style = nextStyle;
+        this._updateUIFromState();
+        this._renderAllPreviews();
+    }
+
+    _applyArrowMode(mode) {
+        if (mode !== 'relative' && mode !== 'absolute') return;
+        this.state.style = { ...this.state.style, linearArrowMode: mode };
+        this._updateUIFromState();
+        this._renderAllPreviews();
+    }
+
+    _applyArrowRelativeMode(mode) {
+        if (mode !== 'over' && mode !== 'end') return;
+        this.state.style = { ...this.state.style, linearArrowRelativeMode: mode };
+        this._updateUIFromState();
+        this._renderAllPreviews();
+    }
+
+    _applyArrowAbsoluteMode(mode) {
+        if (mode !== 'length' && mode !== 'dist') return;
+        const nextStyle = { ...this.state.style, linearArrowAbsoluteMode: mode };
+        nextStyle.linearArrowAbsoluteValue = mode === 'length'
+            ? clampRange(Number(nextStyle.linearArrowAbsoluteValue ?? 1), 1, 5)
+            : clampRange(Number(nextStyle.linearArrowAbsoluteValue ?? 0), 0, 4);
+        this.state.style = nextStyle;
+        this._updateUIFromState();
+        this._renderAllPreviews();
+    }
+
+    _applyArrowValue(value, fromSlider) {
+        if (Number.isNaN(value)) return;
+        const nextStyle = { ...this.state.style };
+        if (nextStyle.linearArrowMode === 'relative') {
+            nextStyle.linearArrowRelativeValue = clamp01(value);
+            if (fromSlider) {
+                this.elements.arrowValueInput.value = nextStyle.linearArrowRelativeValue.toFixed(2);
+            } else {
+                this.elements.arrowValueSlider.value = nextStyle.linearArrowRelativeValue;
+            }
+        } else if (nextStyle.linearArrowAbsoluteMode === 'length') {
+            nextStyle.linearArrowAbsoluteValue = clampRange(value, 1, 5);
+            if (fromSlider) {
+                this.elements.arrowValueInput.value = nextStyle.linearArrowAbsoluteValue.toFixed(2);
+            } else {
+                this.elements.arrowValueSlider.value = nextStyle.linearArrowAbsoluteValue;
+            }
+        } else {
+            nextStyle.linearArrowAbsoluteValue = clampRange(value, 0, 4);
+            if (fromSlider) {
+                this.elements.arrowValueInput.value = nextStyle.linearArrowAbsoluteValue.toFixed(2);
+            } else {
+                this.elements.arrowValueSlider.value = nextStyle.linearArrowAbsoluteValue;
+            }
+        }
+        this.state.style = nextStyle;
+        this._updateUIFromState();
+        this._renderAllPreviews();
+    }
+
     _applyRadiusMode(mode) {
         if (mode !== 'relative' && mode !== 'absolute') return;
         const nextStyle = { ...this.state.style };
@@ -678,6 +1138,18 @@ export default class InterpolationEditor {
         this._updateUIFromState();
     }
 
+    _applyFractalPointCount(value) {
+        const nextCount = Math.max(1, Math.min(3, Math.round(Number(value) || 2)));
+        this.fractalSnapFractions = new Array(nextCount).fill(null);
+        this.state.style = {
+            ...this.state.style,
+            fractalPointCount: nextCount,
+            fractalControlPoints: this._defaultFractalControlPoints(nextCount)
+        };
+        this._updateUIFromState();
+        this._renderAllPreviews();
+    }
+
     _applyTypeSelection(type) {
         const nextStyle = { ...this.state.style, type };
         switch (type) {
@@ -699,6 +1171,16 @@ export default class InterpolationEditor {
                     : absSliderToRadius(nextStyle.absRadiusValue ?? nextStyle.radiusValue);
                 nextStyle.pointHandling = nextStyle.pointHandling === 'mixed' ? 'mixed' : 'control';
                 break;
+            case 'fractal':
+                nextStyle.mode = 'piecewise';
+                nextStyle.order = 1;
+                nextStyle.pointHandling = 'anchor';
+                break;
+            case 'smoothing':
+                nextStyle.mode = 'piecewise';
+                nextStyle.order = 1;
+                nextStyle.pointHandling = 'control';
+                break;
             default:
                 break;
         }
@@ -708,7 +1190,7 @@ export default class InterpolationEditor {
     }
 
     _updateUIFromState() {
-        const { preset, mode, order, radiusMode, radiusValue, tension, type, linearStyle, linearArrowEndMode, nurbsDegree, pointHandling } = this.state.style;
+        const { preset, mode, order, radiusMode, radiusValue, tension, type, linearStyle, linearArrowMode, linearArrowRelativeMode, linearArrowRelativeValue, linearArrowAbsoluteMode, linearArrowAbsoluteValue, nurbsDegree, pointHandling, nurbsMixedSide, fractalPointCount, smoothingAmount, smoothingQuality } = this.state.style;
 
         this.previewCards.forEach((cardInfo, cardPreset) => {
             cardInfo.card.classList.toggle('is-active', cardPreset === preset);
@@ -721,27 +1203,52 @@ export default class InterpolationEditor {
         this.wrapper.querySelectorAll('#linear-style-toggle .toggle-button').forEach(button => {
             button.classList.toggle('is-active', button.dataset.linearStyle === linearStyle);
         });
-        this.wrapper.querySelectorAll('#arrow-end-toggle .toggle-button').forEach(button => {
-            button.classList.toggle('is-active', button.dataset.arrowEndMode === linearArrowEndMode);
+        this.wrapper.querySelectorAll('#arrow-mode-toggle .toggle-button').forEach(button => {
+            button.classList.toggle('is-active', button.dataset.arrowMode === linearArrowMode);
+        });
+        this.wrapper.querySelectorAll('#arrow-relative-toggle .toggle-button').forEach(button => {
+            button.classList.toggle('is-active', button.dataset.arrowRelativeMode === linearArrowRelativeMode);
+        });
+        this.wrapper.querySelectorAll('#arrow-absolute-toggle .toggle-button').forEach(button => {
+            button.classList.toggle('is-active', button.dataset.arrowAbsoluteMode === linearArrowAbsoluteMode);
         });
 
         this.wrapper.querySelectorAll('#point-handling-toggle .toggle-button').forEach(button => {
             button.classList.toggle('is-active', button.dataset.pointHandling === pointHandling);
         });
+        this.wrapper.querySelectorAll('#nurbs-side-toggle .toggle-button').forEach(button => {
+            button.classList.toggle('is-active', button.dataset.nurbsMixedSide === nurbsMixedSide);
+        });
+        this.wrapper.querySelectorAll('#fractal-count-toggle .toggle-button').forEach(button => {
+            button.classList.toggle('is-active', Number(button.dataset.fractalCount) === fractalPointCount);
+        });
+        this.wrapper.querySelectorAll('#smoothing-quality-toggle .toggle-button').forEach(button => {
+            button.classList.toggle('is-active', Number(button.dataset.smoothingQuality) === smoothingQuality);
+        });
 
         const linearSection = this.wrapper.querySelector('#linear-section');
         const arrowEndSection = this.wrapper.querySelector('#arrow-end-section');
+        const arrowRelativeRow = this.wrapper.querySelector('#arrow-relative-row');
+        const arrowAbsoluteRow = this.wrapper.querySelector('#arrow-absolute-row');
         const handlingSection = this.wrapper.querySelector('#handling-section');
         const tensionSection = this.wrapper.querySelector('#tension-section');
         const radiusSection = this.wrapper.querySelector('#radius-section');
+        const smoothingSection = this.wrapper.querySelector('#smoothing-section');
         const nurbsSection = this.wrapper.querySelector('#nurbs-section');
+        const nurbsSideSection = this.wrapper.querySelector('#nurbs-side-section');
+        const fractalSection = this.wrapper.querySelector('#fractal-section');
 
         linearSection.classList.toggle('is-hidden', type !== 'linear');
         arrowEndSection.classList.toggle('is-hidden', !(type === 'linear' && linearStyle === 'arrows'));
-        handlingSection.classList.toggle('is-hidden', type !== 'spline');
+        arrowRelativeRow.classList.toggle('is-hidden', linearArrowMode !== 'relative');
+        arrowAbsoluteRow.classList.toggle('is-hidden', linearArrowMode !== 'absolute');
+        handlingSection.classList.toggle('is-hidden', !(type === 'spline' || type === 'smoothing'));
         tensionSection.classList.toggle('is-hidden', !(type === 'spline' && pointHandling === 'anchor'));
         radiusSection.classList.toggle('is-hidden', type !== 'radius');
+        smoothingSection.classList.toggle('is-hidden', type !== 'smoothing');
         nurbsSection.classList.toggle('is-hidden', !(type === 'spline' && pointHandling !== 'anchor'));
+        nurbsSideSection.classList.toggle('is-hidden', !((type === 'spline' || type === 'smoothing') && pointHandling === 'mixed'));
+        fractalSection.classList.toggle('is-hidden', type !== 'fractal');
 
         this.wrapper.querySelectorAll('#radius-mode-toggle .toggle-button').forEach(button => {
             button.classList.toggle('is-active', button.dataset.radiusMode === radiusMode);
@@ -763,8 +1270,202 @@ export default class InterpolationEditor {
 
         this.elements.tensionSlider.value = Math.max(0, Math.min(1, tension));
         this.elements.tensionInput.value = Number(tension).toFixed(2);
+        if (linearArrowMode === 'relative') {
+            this.elements.arrowValueSlider.min = '0';
+            this.elements.arrowValueSlider.max = '1';
+            this.elements.arrowValueSlider.step = '0.01';
+            this.elements.arrowValueSlider.value = clamp01(linearArrowRelativeValue);
+            this.elements.arrowValueSlider.title = 'relative L';
+            this.elements.arrowValueInput.min = '0';
+            this.elements.arrowValueInput.max = '1';
+            this.elements.arrowValueInput.step = '0.01';
+            this.elements.arrowValueInput.value = clamp01(linearArrowRelativeValue).toFixed(2);
+            this.elements.arrowValueInput.title = 'relative L';
+            this.elements.arrowValueUnit.textContent = 'L';
+        } else if (linearArrowAbsoluteMode === 'length') {
+            this.elements.arrowValueSlider.min = '1';
+            this.elements.arrowValueSlider.max = '5';
+            this.elements.arrowValueSlider.step = '0.05';
+            this.elements.arrowValueSlider.value = clampRange(linearArrowAbsoluteValue, 1, 5);
+            this.elements.arrowValueSlider.title = 'absolute length (r)';
+            this.elements.arrowValueInput.min = '1';
+            this.elements.arrowValueInput.max = '5';
+            this.elements.arrowValueInput.step = '0.05';
+            this.elements.arrowValueInput.value = clampRange(linearArrowAbsoluteValue, 1, 5).toFixed(2);
+            this.elements.arrowValueInput.title = 'absolute length (r)';
+            this.elements.arrowValueUnit.textContent = 'r';
+        } else {
+            this.elements.arrowValueSlider.min = '0';
+            this.elements.arrowValueSlider.max = '4';
+            this.elements.arrowValueSlider.step = '0.05';
+            this.elements.arrowValueSlider.value = clampRange(linearArrowAbsoluteValue, 0, 4);
+            this.elements.arrowValueSlider.title = 'absolute dist (r)';
+            this.elements.arrowValueInput.min = '0';
+            this.elements.arrowValueInput.max = '4';
+            this.elements.arrowValueInput.step = '0.05';
+            this.elements.arrowValueInput.value = clampRange(linearArrowAbsoluteValue, 0, 4).toFixed(2);
+            this.elements.arrowValueInput.title = 'absolute dist (r)';
+            this.elements.arrowValueUnit.textContent = 'r';
+        }
+        this.elements.smoothingSlider.value = clamp01(smoothingAmount);
+        this.elements.smoothingInput.value = clamp01(smoothingAmount).toFixed(2);
         this.elements.nurbsDegreeSlider.value = nurbsDegree;
         this.elements.nurbsDegreeInput.value = nurbsDegree;
+        this._renderFractalControlLine();
+    }
+
+    _renderFractalControlLine() {
+        const canvas = this.elements.fractalCanvas;
+        if (!canvas) return;
+        if (this.elements.fractalSnapLabels) {
+            this.elements.fractalSnapLabels.replaceChildren();
+        }
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width;
+        const h = canvas.height;
+        const pad = 10;
+        const x0 = pad;
+        const x1 = w - pad;
+        const yMid = h / 2;
+        const px = (u) => x0 + (x1 - x0) * u;
+        const py = (v) => yMid - (v / FRACTAL_V_LIMIT) * (h * 0.35);
+        const controls = this.state.style.fractalControlPoints || [];
+        const pattern = [{ u: 0, v: 0 }, ...controls, { u: 1, v: 0 }];
+
+        ctx.clearRect(0, 0, w, h);
+        ctx.fillStyle = '#111827';
+        ctx.fillRect(0, 0, w, h);
+        const yTop = py(FRACTAL_V_LIMIT);
+        const yBottom = py(-FRACTAL_V_LIMIT);
+        ctx.save();
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = '#334155';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x0, yTop);
+        ctx.lineTo(x1, yTop);
+        ctx.moveTo(x0, yBottom);
+        ctx.lineTo(x1, yBottom);
+        ctx.stroke();
+        ctx.restore();
+        ctx.strokeStyle = '#475569';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x0, yMid);
+        ctx.lineTo(x1, yMid);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#94a3b8';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        pattern.forEach((pt, i) => {
+            const x = px(pt.u);
+            const y = py(pt.v);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+
+        pattern.forEach((pt, i) => {
+            ctx.beginPath();
+            ctx.arc(px(pt.u), py(pt.v), i === 0 || i === pattern.length - 1 ? 3 : 4, 0, Math.PI * 2);
+            ctx.fillStyle = i === 0 || i === pattern.length - 1 ? '#60a5fa' : '#f59e0b';
+            ctx.fill();
+        });
+        const labelsLayer = this.elements.fractalSnapLabels;
+        if (!labelsLayer) return;
+        controls.forEach((pt, index) => {
+            const snap = this.fractalSnapFractions[index];
+            if (!snap || !Number.isFinite(pt.u) || !Number.isFinite(pt.v)) return;
+            const label = document.createElement('div');
+            label.style.position = 'absolute';
+            label.style.left = `${px(pt.u)}px`;
+            label.style.top = `${Math.min(h - 4, py(pt.v) + 8)}px`;
+            label.style.transform = 'translateX(-50%)';
+            label.style.fontSize = '11px';
+            label.style.lineHeight = '1';
+            label.style.color = '#f8fafc';
+            label.style.textShadow = '0 0 2px rgba(0,0,0,0.7)';
+            if (snap.mode === 'fraction') {
+                const xText = `\\frac{${snap.uNum}}{${snap.uDen}}`;
+                const yText = snap.vNum === 0
+                    ? '0'
+                    : `${snap.vNum < 0 ? '-' : ''}\\frac{${Math.abs(snap.vNum)}}{${snap.vDen}}`;
+                const coordText = `\\left(${xText},\\,${yText}\\right)`;
+                if (globalThis.katex?.renderToString) {
+                    label.innerHTML = globalThis.katex.renderToString(coordText, {
+                        throwOnError: false
+                    });
+                } else {
+                    label.textContent = `(${snap.uNum}/${snap.uDen}, ${snap.vNum}/${snap.vDen})`;
+                }
+            } else {
+                label.textContent = `(${snap.u.toFixed(3)}, ${snap.v.toFixed(3)})`;
+            }
+            labelsLayer.appendChild(label);
+        });
+    }
+
+    _fractalControlFromMouse(event, index = null, currentControls = null) {
+        const canvas = this.elements.fractalCanvas;
+        if (!canvas) return null;
+        const rect = canvas.getBoundingClientRect();
+        const x = ((event.clientX - rect.left) / rect.width) * canvas.width;
+        const y = ((event.clientY - rect.top) / rect.height) * canvas.height;
+        const pad = 10;
+        const x0 = pad;
+        const x1 = canvas.width - pad;
+        const yMid = canvas.height / 2;
+        let u = Math.max(0.05, Math.min(0.95, (x - x0) / (x1 - x0)));
+        const uMin = 0.05;
+        const uMax = 0.95;
+        if (event.shiftKey) {
+            const uSnap = this._snapFractalU(u, uMin, uMax);
+            u = uSnap.u;
+            let vRaw = ((yMid - y) / (canvas.height * 0.35)) * FRACTAL_V_LIMIT;
+            vRaw = Math.max(-FRACTAL_V_LIMIT, Math.min(FRACTAL_V_LIMIT, vRaw));
+            const vSnap = this._snapFractalV(vRaw);
+            const v = vSnap.v;
+            if (index !== null) {
+                this.fractalSnapFractions[index] = {
+                    mode: 'fraction',
+                    uNum: uSnap.num,
+                    uDen: uSnap.den,
+                    vNum: vSnap.num,
+                    vDen: vSnap.den
+                };
+            }
+            return { u, v };
+        }
+        const v = Math.max(-FRACTAL_V_LIMIT, Math.min(FRACTAL_V_LIMIT, ((yMid - y) / (canvas.height * 0.35)) * FRACTAL_V_LIMIT));
+        if (index !== null) {
+            this.fractalSnapFractions[index] = {
+                mode: 'decimal',
+                u,
+                v
+            };
+        }
+        return { u, v };
+    }
+
+    _findFractalControlHit(event) {
+        const canvas = this.elements.fractalCanvas;
+        if (!canvas) return null;
+        const rect = canvas.getBoundingClientRect();
+        const x = ((event.clientX - rect.left) / rect.width) * canvas.width;
+        const y = ((event.clientY - rect.top) / rect.height) * canvas.height;
+        const pad = 10;
+        const x0 = pad;
+        const x1 = canvas.width - pad;
+        const yMid = canvas.height / 2;
+        const hitRadius = 8;
+        const controls = this.state.style.fractalControlPoints || [];
+        for (let i = 0; i < controls.length; i++) {
+            const cx = x0 + (x1 - x0) * controls[i].u;
+            const cy = yMid - (controls[i].v / FRACTAL_V_LIMIT) * (canvas.height * 0.35);
+            if (Math.hypot(x - cx, y - cy) <= hitRadius) return i;
+        }
+        return null;
     }
 
     _renderAllPreviews() {
@@ -773,6 +1474,41 @@ export default class InterpolationEditor {
             if (!card) return;
             this._renderPreviewCard(card.canvas, preset.id, preset.id === this.state.style.preset);
         });
+    }
+
+    _renderSinglePreview(presetId) {
+        const card = this.previewCards.get(presetId);
+        if (!card) return;
+        this._renderPreviewCard(card.canvas, presetId, presetId === this.state.style.preset);
+    }
+
+    _requestPreviewRender(presetId = null) {
+        if (presetId) {
+            this._pendingRenderPresets.add(presetId);
+        } else {
+            this._pendingRenderAll = true;
+        }
+        if (this._renderThrottleTimer !== null) return;
+        this._renderThrottleTimer = setTimeout(() => {
+            this._flushPendingPreviewRender();
+        }, this._renderThrottleMs);
+    }
+
+    _flushPendingPreviewRender() {
+        if (this._renderThrottleTimer !== null) {
+            clearTimeout(this._renderThrottleTimer);
+            this._renderThrottleTimer = null;
+        }
+        if (this._pendingRenderAll) {
+            this._pendingRenderAll = false;
+            this._pendingRenderPresets.clear();
+            this._renderAllPreviews();
+            return;
+        }
+        if (!this._pendingRenderPresets.size) return;
+        const presets = Array.from(this._pendingRenderPresets);
+        this._pendingRenderPresets.clear();
+        presets.forEach((presetId) => this._renderSinglePreview(presetId));
     }
 
     _renderPreviewCard(canvas, presetId, isActive) {
@@ -903,20 +1639,29 @@ export default class InterpolationEditor {
         const hasFaces = !!(faceVertices && faceList && faceList.length);
         let boundaryFillPoints = null;
         let boundaryVertexSet = null;
+        const mixedDebugHiddenPoints = [];
+        const mixedDebugAnchorPoints = [];
+        const mixedDebugByPath = [];
         const referenceScale = Math.hypot(usableW, usableH);
         preset.paths.forEach((path, pathIndex) => {
             const normalizedPoints = path.points;
             const points = normalizedPoints.map(toCanvas);
             normalizedPoints.forEach(trackPoint);
-            if (pathIndex === 0 && presetId === 'closed') {
-                console.groupCollapsed('anchor-control-debug');
-                console.log('mode', this.state.style.mode);
-                console.log('type', this.state.style.type);
-                console.log('pointHandling', this.state.style.pointHandling);
-                console.log('radiusMode', this.state.style.radiusMode);
-                console.log('radiusValue', this.state.style.radiusValue);
+            if (this.state.style.type === 'spline' && this.state.style.pointHandling === 'mixed') {
+                const debug = this._computeMixedHiddenPoints(normalizedPoints, path.closed);
+                mixedDebugHiddenPoints.push(...debug.hidden.map(toCanvas));
+                mixedDebugAnchorPoints.push(...debug.anchors.map(toCanvas));
+                mixedDebugByPath.push({
+                    pathIndex,
+                    closed: !!path.closed,
+                    pointCount: normalizedPoints.length,
+                    start: normalizedPoints[0] || null,
+                    end: normalizedPoints[normalizedPoints.length - 1] || null,
+                    anchors: debug.anchors.length,
+                    hidden: debug.hidden.length
+                });
             }
-            if (points.length >= 2) {
+            if (points.length >= 2 && (this.state.style.pointHandling !== 'mixed' || presetId === 'open')) {
                 ctx.save();
                 ctx.lineWidth = Math.max(1, this._getStrokeWidth() * 0.6);
                 ctx.strokeStyle = '#94a3b8';
@@ -953,23 +1698,7 @@ export default class InterpolationEditor {
             }
             let drawPoints = this._getInterpolatedPoints(points, path.closed, referenceScale);
             if (drawPoints.length < 2) {
-                if (pathIndex === 0 && presetId === 'closed') {
-                    console.log('drawPoints empty');
-                    console.groupEnd();
-                }
                 return;
-            }
-            if (pathIndex === 0 && presetId === 'closed') {
-                const min = drawPoints.reduce((acc, pt) => ({
-                    x: Math.min(acc.x, pt.x),
-                    y: Math.min(acc.y, pt.y)
-                }), { x: Infinity, y: Infinity });
-                const max = drawPoints.reduce((acc, pt) => ({
-                    x: Math.max(acc.x, pt.x),
-                    y: Math.max(acc.y, pt.y)
-                }), { x: -Infinity, y: -Infinity });
-                console.log('drawPoints bounds', { min, max });
-                console.groupEnd();
             }
             if (isBranchingRadius) {
                 drawPoints = this._sampleWithEngine(points, path.closed);
@@ -1029,13 +1758,16 @@ export default class InterpolationEditor {
                 }
             }
             if (drawPoints.length < 2) return;
+            const drawLinearArrows = this.state.style.type === 'linear' && this.state.style.linearStyle === 'arrows';
             ctx.beginPath();
             ctx.moveTo(drawPoints[0].x, drawPoints[0].y);
             drawPoints.slice(1).forEach(pt => ctx.lineTo(pt.x, pt.y));
             if (path.closed && (this.state.style.mode !== 'radius' || this.state.style.radiusValue <= 1e-6)) {
                 ctx.closePath();
             }
-            ctx.stroke();
+            if (!drawLinearArrows) {
+                ctx.stroke();
+            }
             if (path.isBoundary && path.closed) {
                 boundaryFillPoints = drawPoints;
                 boundaryVertexSet = new Set(normalizedPoints);
@@ -1045,12 +1777,52 @@ export default class InterpolationEditor {
 
             // Removed radius helper dots for cleaner preview.
 
-            if (this.state.style.type === 'linear' && this.state.style.linearStyle === 'arrows') {
+            if (drawLinearArrows) {
                 this._drawEdgeArrows(ctx, points, path.closed);
             }
 
             // Debug segment markers removed.
         });
+
+        if (isActive && this.state.style.type === 'spline' && this.state.style.pointHandling === 'mixed') {
+            ctx.save();
+            ctx.fillStyle = '#f59e0b';
+            mixedDebugHiddenPoints.forEach((pt) => {
+                ctx.beginPath();
+                ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            ctx.fillStyle = '#fbbf24';
+            mixedDebugAnchorPoints.forEach((pt) => {
+                ctx.beginPath();
+                ctx.arc(pt.x, pt.y, 2, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            ctx.restore();
+
+            const minDistanceToCurve = (target) => {
+                let best = Infinity;
+                preset.paths.forEach((path) => {
+                    const pathCanvasPoints = path.points.map(toCanvas);
+                    const sampled = this._sampleWithEngine(pathCanvasPoints, path.closed);
+                    sampled.forEach((pt) => {
+                        const d = Math.hypot(pt.x - target.x, pt.y - target.y);
+                        if (d < best) best = d;
+                    });
+                });
+                return best;
+            };
+            console.groupCollapsed('[mixed-debug]');
+            console.log('preset', presetId);
+            console.log('side', this.state.style.nurbsMixedSide);
+            console.log('tension', this.state.style.tension);
+            console.log('hidden_count', mixedDebugHiddenPoints.length);
+            console.log('anchor_count', mixedDebugAnchorPoints.length);
+            const anchorDistances = mixedDebugAnchorPoints.map((pt) => minDistanceToCurve(pt));
+            console.log('anchor_min_dists_px', anchorDistances);
+            console.log('paths', mixedDebugByPath);
+            console.groupEnd();
+        }
 
         if (boundaryFillPoints && boundaryFillPoints.length >= 2) {
             ctx.save();
@@ -1106,6 +1878,55 @@ export default class InterpolationEditor {
         });
     }
 
+    _computeMixedHiddenPoints(points, closed) {
+        if (!Array.isArray(points) || points.length < 3) {
+            return { hidden: [], anchors: [] };
+        }
+        const side = this.state.style.nurbsMixedSide === 'right' ? 'right' : 'left';
+        const sideSign = side === 'right' ? -1 : 1;
+        const tension = Math.max(0, Math.min(1, Number(this.state.style.tension ?? 0.5)));
+        const handleScale = 1 / 3;
+        const convexEps = 1e-9;
+        const orientation = (() => {
+            if (!closed || points.length < 3) return 1;
+            let area = 0;
+            for (let i = 0; i < points.length; i++) {
+                const n = points[(i + 1) % points.length];
+                area += points[i].x * n.y - n.x * points[i].y;
+            }
+            return Math.abs(area) < 1e-9 ? 1 : area;
+        })();
+        const hidden = [];
+        const anchors = [];
+        const n = points.length;
+        for (let i = 0; i < n; i++) {
+            if (!closed && (i === 0 || i === n - 1)) continue;
+            const prev = points[(i + n - 1) % n];
+            const curr = points[i];
+            const next = points[(i + 1) % n];
+            const vin = { x: curr.x - prev.x, y: curr.y - prev.y };
+            const vout = { x: next.x - curr.x, y: next.y - curr.y };
+            const cross = (vin.x * vout.y - vin.y * vout.x) * sideSign;
+            const isConvex = orientation >= 0 ? cross >= convexEps : cross <= -convexEps;
+            if (!isConvex) continue;
+            const vinLen = Math.hypot(vin.x, vin.y) || 1;
+            const voutLen = Math.hypot(vout.x, vout.y) || 1;
+            const uIn = { x: vin.x / vinLen, y: vin.y / vinLen };
+            const uOut = { x: vout.x / voutLen, y: vout.y / voutLen };
+            const tRaw = { x: uIn.x + uOut.x, y: uIn.y + uOut.y };
+            const tLen = Math.hypot(tRaw.x, tRaw.y);
+            const tangent = tLen < 1e-9 ? uOut : { x: tRaw.x / tLen, y: tRaw.y / tLen };
+            const dIn = handleScale * (1 - tension) * vinLen;
+            const dOut = handleScale * (1 - tension) * voutLen;
+            anchors.push(curr);
+            hidden.push(
+                { x: curr.x - tangent.x * dIn, y: curr.y - tangent.y * dIn },
+                { x: curr.x + tangent.x * dOut, y: curr.y + tangent.y * dOut }
+            );
+        }
+        return { hidden, anchors };
+    }
+
     _getStrokeWidth() {
         return 2;
     }
@@ -1113,6 +1934,7 @@ export default class InterpolationEditor {
     _drawEdgeArrows(ctx, points, closed) {
         if (points.length < 2) return;
         const arrowStrokeWidth = 2;
+        const r = 3.5;
         const arrowCapWidth = 8;
         const arrowCapHeight = 8;
         const count = points.length;
@@ -1133,22 +1955,44 @@ export default class InterpolationEditor {
             if (len < 1e-3) continue;
             const ux = dx / len;
             const uy = dy / len;
-            const insetFactor = this.state.style.linearArrowEndMode === 'endpoint'
-                ? 0
-                : (this.state.style.linearArrowEndMode === '2radius' ? 2 : 1);
-            const inset = 3.5 * insetFactor;
+            const mode = this.state.style.linearArrowMode === 'absolute' ? 'absolute' : 'relative';
+            const relMode = this.state.style.linearArrowRelativeMode === 'over' ? 'over' : 'end';
+            const relValue = clamp01(Number(this.state.style.linearArrowRelativeValue ?? 0));
+            const absMode = this.state.style.linearArrowAbsoluteMode === 'length' ? 'length' : 'dist';
+            const absValue = absMode === 'length'
+                ? clampRange(Number(this.state.style.linearArrowAbsoluteValue ?? 1), 1, 5)
+                : clampRange(Number(this.state.style.linearArrowAbsoluteValue ?? 0), 0, 4);
+            const minAbsoluteLength = r;
+            if (mode === 'absolute' && len < minAbsoluteLength) {
+                continue;
+            }
+            const minTipDistance = Math.min(len, arrowCapHeight + 0.25);
+            let tipDistanceAlongEdge;
+            if (mode === 'relative') {
+                tipDistanceAlongEdge = len * (1 - relValue);
+            } else if (absMode === 'length') {
+                const absoluteLength = clampRange(absValue * r, minAbsoluteLength, len);
+                tipDistanceAlongEdge = absoluteLength;
+            } else {
+                const maxInset = Math.max(0, len - minAbsoluteLength);
+                const insetAbs = clampRange(absValue * r, 0, maxInset);
+                tipDistanceAlongEdge = len - insetAbs;
+            }
+            tipDistanceAlongEdge = clampRange(tipDistanceAlongEdge, minTipDistance, len);
             const tip = {
-                x: end.x - ux * inset,
-                y: end.y - uy * inset
+                x: start.x + ux * tipDistanceAlongEdge,
+                y: start.y + uy * tipDistanceAlongEdge
             };
+            const baseDistanceAlongEdge = Math.max(0, tipDistanceAlongEdge - arrowCapHeight);
             const base = {
-                x: tip.x - ux * arrowCapHeight,
-                y: tip.y - uy * arrowCapHeight
+                x: start.x + ux * baseDistanceAlongEdge,
+                y: start.y + uy * baseDistanceAlongEdge
             };
-            // Draw only to arrow cap base so the stroke does not run under the arrowhead.
+            const keepEdgeVisibleUnderArrow = mode === 'relative' && relMode === 'over';
+            const lineEnd = keepEdgeVisibleUnderArrow ? end : tip;
             ctx.beginPath();
             ctx.moveTo(start.x, start.y);
-            ctx.lineTo(base.x, base.y);
+            ctx.lineTo(lineEnd.x, lineEnd.y);
             ctx.stroke();
             const left = {
                 x: base.x + -uy * (arrowCapWidth / 2),
@@ -1182,7 +2026,28 @@ export default class InterpolationEditor {
     }
 
     _styleToEnginePayload() {
-        const { type, tension, radiusMode, radiusValue, linearStyle, linearArrowEndMode, pointHandling, nurbsDegree } = this.state.style;
+        const { type, tension, radiusMode, radiusValue, linearStyle, pointHandling, nurbsDegree, nurbsMixedSide, smoothingAmount, smoothingQuality } = this.state.style;
+        if (type === 'fractal') {
+            const controls = this._normalizeFractalControlPoints(
+                this.state.style.fractalControlPoints,
+                this.state.style.fractalPointCount
+            );
+            return {
+                type: 'fractal',
+                nurbs_knots: controls.map((pt) => Number(pt.u)),
+                nurbs_weights: controls.map((pt) => Number(pt.v)),
+                radius_value: FRACTAL_MIN_SEGMENT_PX
+            };
+        }
+        if (type === 'smoothing') {
+            return {
+                type: 'smoothing',
+                tension: Number(smoothingAmount ?? 0.5),
+                corner_handling: pointHandling,
+                nurbs_side: nurbsMixedSide === 'right' ? 'right' : 'left',
+                nurbs_degree: Math.max(1, Math.min(5, Math.round(Number(smoothingQuality ?? 1))))
+            };
+        }
         const useNurbs = type === 'spline' && (pointHandling === 'control' || pointHandling === 'mixed');
         const mappedType = type === 'radius'
             ? 'circular_arc'
@@ -1196,13 +2061,37 @@ export default class InterpolationEditor {
             radius_mode: mappedMode,
             radius_value: Number(radiusValue ?? 0),
             linear_style: linearStyle === 'arrows' ? 'arrows' : 'lines',
-            linear_arrow_end_mode: linearArrowEndMode === 'endpoint'
+            linear_arrow_end_mode: this._legacyArrowEndModeFromStyle(this.state.style) === 'endpoint'
                 ? 'endpoint'
-                : (linearArrowEndMode === '2radius' ? 'two_radius' : 'radius'),
+                : (this._legacyArrowEndModeFromStyle(this.state.style) === '2radius' ? 'two_radius' : 'radius'),
             nurbs_degree: useNurbs ? Math.max(2, Math.min(5, Math.round(Number(nurbsDegree ?? 3)))) : undefined,
             nurbs_point_mode: useNurbs ? (pointHandling === 'mixed' ? 'mixed' : 'control_only') : undefined,
-            nurbs_mixed_rule: useNurbs && pointHandling === 'mixed' ? 'convex_anchor_concave_control' : undefined
+            nurbs_mixed_rule: useNurbs && pointHandling === 'mixed' ? 'convex_anchor_concave_control' : undefined,
+            nurbs_side: useNurbs && pointHandling === 'mixed'
+                ? (nurbsMixedSide === 'right' ? 'right' : 'left')
+                : undefined
         };
+    }
+
+    _legacyArrowEndModeFromStyle(style = this.state.style) {
+        const mode = style.linearArrowMode === 'absolute' ? 'absolute' : 'relative';
+        if (mode === 'relative') {
+            const relMode = style.linearArrowRelativeMode === 'over' ? 'over' : 'end';
+            const relValue = clamp01(Number(style.linearArrowRelativeValue ?? 0));
+            if (relMode === 'over' || relValue <= 0.15) return 'endpoint';
+            if (relValue <= 0.35) return 'radius';
+            return '2radius';
+        }
+        const absMode = style.linearArrowAbsoluteMode === 'length' ? 'length' : 'dist';
+        const absValue = Number(style.linearArrowAbsoluteValue ?? 1);
+        if (absMode === 'dist') {
+            if (absValue <= 0.5) return 'endpoint';
+            if (absValue <= 1.5) return 'radius';
+            return '2radius';
+        }
+        if (absValue <= 2) return 'endpoint';
+        if (absValue <= 3.5) return 'radius';
+        return '2radius';
     }
 
     _sampleWithEngine(points, closed) {
@@ -1218,10 +2107,14 @@ export default class InterpolationEditor {
         if (closed) {
             edges.push({ from: points.length - 1, to: 0 });
         }
+        const type = this.state.style.type;
+        const samplesPerSegment = (type === 'fractal' || type === 'smoothing')
+            ? ((type === 'smoothing' && Number(this.state.style.smoothingQuality) <= 1) ? 1 : 2)
+            : PREVIEW_SAMPLES_PER_SEGMENT;
         const payload = {
             graph: { vertices, edges },
             style: this._styleToEnginePayload(),
-            samples_per_segment: 16
+            samples_per_segment: samplesPerSegment
         };
         const result = this.engineInterpolation(payload);
         if (!result || typeof result === 'string') {
@@ -1344,6 +2237,15 @@ export default class InterpolationEditor {
 
     _getPresetPoints(presetId) {
         const presetData = this.state.previewPoints[presetId];
+        if (presetId === 'open' && presetData && presetData.vertices && presetData.edges) {
+            // Keep the open preset deterministic as a single open chain.
+            return {
+                paths: [{
+                    closed: false,
+                    points: presetData.vertices
+                }]
+            };
+        }
         if (presetData && presetData.vertices && presetData.edges) {
             return this._buildPathsFromGraph(presetData);
         }
@@ -1358,41 +2260,48 @@ export default class InterpolationEditor {
 
         if (presetId === 'branching') {
             const stem = this.state.previewPoints.branching[0] || [];
-            const stemRoot = stem.length >= 1 ? stem[stem.length - 1] : null;
-            const stemMid = stem.length >= 2 ? stem[stem.length - 2] : null;
-            const isSpline = this.state.style.type === 'spline';
-            const stemLeadPoints = isSpline
-                ? stem.slice(Math.max(0, stem.length - 3))
-                : stem.slice(Math.max(0, stem.length - 2));
-            return {
-                paths: this.state.previewPoints.branching.map((points, index) => {
-                    if (index === 0) {
-                        return {
-                            closed: false,
-                            points,
-                            trimToPoint: isSpline ? stemMid : null,
-                            forceTrim: isSpline,
-                            trueEndpointStart: true,
-                            trueEndpointEnd: false
-                        };
-                    }
-                    const branchPoints = [...stemLeadPoints];
-                    const branchHead = points[0];
-                    const shouldSkipHead = stemRoot
-                        && branchHead
-                        && Math.abs(branchHead.x - stemRoot.x) < 1e-6
-                        && Math.abs(branchHead.y - stemRoot.y) < 1e-6;
-                    const branchTail = shouldSkipHead ? points.slice(1) : points;
-                    branchPoints.push(...branchTail);
-                    return {
+            if (stem.length < 4) {
+                return {
+                    paths: this.state.previewPoints.branching.map(points => ({
                         closed: false,
-                        points: branchPoints,
-                        trimFromPoint: isSpline ? stemMid : stemRoot,
-                        forceTrim: isSpline,
-                        trueEndpointStart: false,
-                        trueEndpointEnd: true
-                    };
-                })
+                        points
+                    }))
+                };
+            }
+            // Phantom-point split model:
+            // stem a-b-c-d -> sample with a-b-c-d, draw only a-b-c (phantom d)
+            // branch d-e-f -> sample with b-c-d-e-f, draw c-d-e-f (phantom b)
+            // branch d-g-h -> sample with b-c-d-g-h, draw c-d-g-h (phantom b)
+            const b = stem[stem.length - 3];
+            const c = stem[stem.length - 2];
+            const d = stem[stem.length - 1];
+            const branchPaths = this.state.previewPoints.branching.slice(1).map((branch) => {
+                const head = branch[0];
+                const startsAtJunction = head
+                    && Math.abs(head.x - d.x) < 1e-6
+                    && Math.abs(head.y - d.y) < 1e-6;
+                const tail = startsAtJunction ? branch.slice(1) : branch;
+                return {
+                    closed: false,
+                    points: [b, c, d, ...tail],
+                    trimFromPoint: c,
+                    forceTrim: true,
+                    trueEndpointStart: false,
+                    trueEndpointEnd: true
+                };
+            });
+            return {
+                paths: [
+                    {
+                        closed: false,
+                        points: stem,
+                        trimToPoint: c,
+                        forceTrim: true,
+                        trueEndpointStart: true,
+                        trueEndpointEnd: false
+                    },
+                    ...branchPaths
+                ]
             };
         }
 
@@ -1890,7 +2799,7 @@ export default class InterpolationEditor {
             if (targetPoint) {
                 targetPoint.x = clamped.x;
                 targetPoint.y = clamped.y;
-                this._renderAllPreviews();
+                this._requestPreviewRender();
             }
             return;
         }
@@ -1901,7 +2810,7 @@ export default class InterpolationEditor {
                 if (presetData.pathOverrides) {
                     delete presetData.pathOverrides;
                 }
-                this._renderAllPreviews();
+                this._requestPreviewRender();
             }
             return;
         }
@@ -1918,7 +2827,7 @@ export default class InterpolationEditor {
         } else {
             targetPath[pointIndex] = clamped;
         }
-        this._renderAllPreviews();
+        this._requestPreviewRender();
     }
 
     _handlePreviewMouseUp() {
